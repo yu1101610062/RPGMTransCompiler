@@ -1,21 +1,21 @@
 # RPGMTransCompiler
 
-本项目是一款面向桌面版 RPG Maker 游戏的本地运行时翻译工具。它通过注入运行时插件拦截游戏窗口绘制文本，配合本地翻译应用进行异步翻译、缓存写入和窗口刷新。工具不把模型 API 密钥写入游戏插件，已翻译文本以便携缓存文件保存在游戏目录中，复制游戏目录后可直接复用已生成的译文。
+本项目是一款面向桌面版 RPG / 视觉小说游戏的本地运行时翻译工具。它通过注入运行时插件拦截游戏窗口绘制文本，配合本地翻译应用进行异步翻译、缓存写入和窗口刷新。工具不把模型 API 密钥写入游戏插件，已翻译文本以便携缓存文件保存在游戏目录中，复制游戏目录后可直接复用已生成的译文。
 
-RPGMTransCompiler is a local runtime translation tool for desktop RPG Maker games. It injects a runtime plugin that observes text rendered by game windows, while the local application translates asynchronously, writes a portable cache, and asks the game UI to refresh. Model API keys are never embedded in the game plugin; translated text is stored as a portable cache inside the game directory and can be reused when the game is moved to another machine.
+RPGMTransCompiler is a local runtime translation tool for desktop RPG and visual novel games. It injects a runtime plugin that observes text rendered by game windows, while the local application translates asynchronously, writes a portable cache, and asks the game UI to refresh. Model API keys are never embedded in the game plugin; translated text is stored as a portable cache inside the game directory and can be reused when the game is moved to another machine.
 
 ## 功能 / Features
 
 - 中文桌面启动器：支持拖入 `Game.exe`、`RPG_RT.exe` 或 `nw.exe` 后扫描、注入、监听、预翻译和启动游戏。
 - 运行时翻译：首次遇到未翻译文本时显示原文并记录请求，翻译完成后写入缓存，游戏插件热加载缓存并刷新窗口。
-- 预翻译缓存：扫描高置信 RPG Maker 数据文本，提前写入 `RPGMTransRuntime/cache/translations.rtc`，运行时继续补漏。
+- 预翻译缓存：扫描高置信引擎数据和脚本文本，提前写入 `RPGMTransRuntime/cache/translations.rtc`，运行时继续补漏。
 - 原目录注入和还原：当前版本直接在选定游戏目录注入插件，并在修改前备份原始文件；可通过启动器或 CLI 执行还原。
 - 便携缓存协议：缓存文件为纯文本协议，运行时插件无需数据库或外部运行库即可读取译文。
 - 密钥隔离：API key 只由本地翻译应用读取，游戏插件不访问外部模型服务。
 
 - Chinese desktop launcher: drag in `Game.exe`, `RPG_RT.exe`, or `nw.exe` to scan, inject, watch, pretranslate, and launch the game.
 - Runtime translation: untranslated text is shown once, logged as a request, translated by the local app, cached, and reloaded by the game plugin.
-- Pretranslation cache: high-confidence RPG Maker data text can be translated ahead of time into `RPGMTransRuntime/cache/translations.rtc`; runtime hooks still cover missed dynamic text.
+- Pretranslation cache: high-confidence engine data and script text can be translated ahead of time into `RPGMTransRuntime/cache/translations.rtc`; runtime hooks still cover missed dynamic text.
 - In-place injection and restore: the current version injects into the selected game directory and backs up modified files before patching.
 - Portable text cache protocol: the runtime plugin reads a plain text cache without SQLite or platform-specific libraries.
 - Key isolation: API keys are read only by the local translation app; game plugins never call model providers directly.
@@ -29,10 +29,12 @@ RPGMTransCompiler is a local runtime translation tool for desktop RPG Maker game
 | RPG Maker XP | 支持 / Supported | RGSS 运行时 / RGSS runtime |
 | RPG Maker VX | 支持 / Supported | RGSS2 运行时 / RGSS2 runtime |
 | RPG Maker VX Ace | 支持 / Supported | RGSS3 运行时 / RGSS3 runtime |
+| Ren'Py | 支持 / Supported | 桌面版，含 `.rpyc` 预翻译候选抽取 / Desktop builds, including `.rpyc` pretranslation candidate extraction |
+| TyranoScript / TyranoBuilder | 支持 / Supported | 桌面版，优先 `[loadjs]` 注入 / Desktop builds, `[loadjs]` injection preferred |
 
 不支持浏览器导出版和 RPG Maker 2000/2003。运行时补漏只能覆盖游戏实际显示过的文本；未触发过的文本会继续显示原文，直到被插件记录并由本地应用翻译。
 
-Browser exports and RPG Maker 2000/2003 are not supported. Runtime fallback only covers text that has actually been rendered by the game; unseen text remains original until it is logged and translated by the local application.
+Browser exports, mobile packages, and RPG Maker 2000/2003 are not supported. Runtime fallback only covers text that has actually been rendered by the game; unseen text remains original until it is logged and translated by the local application.
 
 ## 安装 / Installation
 
@@ -41,6 +43,7 @@ Browser exports and RPG Maker 2000/2003 are not supported. Runtime fallback only
 - Node.js 22.5 或更高版本 / Node.js 22.5 or newer
 - Windows + .NET SDK 8，用于桌面启动器 / Windows with .NET SDK 8 for the desktop launcher
 - Ruby，用于 XP/VX/VX Ace Marshal 数据桥接 / Ruby for XP/VX/VX Ace Marshal bridge
+- Python，用于 Ren'Py `.rpyc` 只读文本抽取 / Python for read-only Ren'Py `.rpyc` text extraction
 
 ```powershell
 npm install

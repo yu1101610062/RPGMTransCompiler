@@ -40,7 +40,7 @@ export function scanProject(sourceRootInput: string, options: ScanOptions = {}):
     extractedRoot,
     outputRoot,
     engine: {
-      family: "RPG_MAKER",
+      family: detected.family,
       name: detected.engine,
       detectedBy: detected.detectedBy,
       confidence: detected.confidence
@@ -75,6 +75,7 @@ function readExistingRuntime(root: string): RuntimeInstallManifest | undefined {
 }
 
 interface Detection {
+  family: RuntimeProfile["engine"]["family"];
   engine: EngineName;
   confidence: number;
   detectedBy: string[];
@@ -95,6 +96,9 @@ function detectEngine(root: string): Detection {
   const rgssArchive = findFirst(root, ["Game.rgss3a", "Game.rgss2a", "Game.rgssad"]);
   const archiveVersion = rgssArchive ? readRgssArchiveVersion(rgssArchive) : undefined;
 
+  const renpy = detectRenpy(root);
+  if (renpy) return renpy;
+
   if (fs.existsSync(path.join(root, "data", "System.json")) || fs.existsSync(path.join(root, "www", "data", "System.json"))) {
     const isMz = fs.existsSync(path.join(root, "js", "rmmz_core.js")) || fs.existsSync(path.join(root, "www", "js", "rmmz_core.js"));
     const dataRoot = fs.existsSync(path.join(root, "data")) ? path.join(root, "data") : path.join(root, "www", "data");
@@ -103,6 +107,7 @@ function detectEngine(root: string): Detection {
     detectedBy.push(path.relative(root, jsRoot).replace(/\\/g, "/"));
     const plugins = readPlugins(path.join(jsRoot, "plugins.js"));
     return {
+      family: "RPG_MAKER",
       engine: isMz ? "MZ" : "MV",
       confidence: 0.95,
       detectedBy,
@@ -114,6 +119,9 @@ function detectEngine(root: string): Detection {
       plugins
     };
   }
+
+  const tyrano = detectTyrano(root);
+  if (tyrano) return tyrano;
 
   if (ini.includes("RGSS301") || fs.existsSync(path.join(root, "Game.rvproj2")) || archiveVersion === 3) {
     if (ini.includes("RGSS301")) detectedBy.push("Game.ini:Library=System\\RGSS301.dll");
@@ -127,6 +135,7 @@ function detectEngine(root: string): Detection {
         }
       : undefined;
     return {
+      family: "RPG_MAKER",
       engine: "VXA",
       confidence: archive ? 0.98 : 0.9,
       detectedBy,
@@ -156,6 +165,7 @@ function detectEngine(root: string): Detection {
     detectedBy.push(...["RPG_RT.ldb", "RPG_RT.lmt"].filter(file => fs.existsSync(path.join(root, file))));
     const files = listFiles(root, /\.(ldb|lmt|lmu)$/i);
     return {
+      family: "RPG_MAKER",
       engine: "RM2K3",
       confidence: 0.8,
       detectedBy,
@@ -168,6 +178,7 @@ function detectEngine(root: string): Detection {
   }
 
   return {
+    family: "RPG_MAKER",
     engine: "UNKNOWN",
     confidence: 0,
     detectedBy: [],
@@ -176,6 +187,59 @@ function detectEngine(root: string): Detection {
     dataFiles: [],
     encoding: "unknown",
     scriptRuntime: { language: "unknown", runtime: "unknown" }
+  };
+}
+
+function detectRenpy(root: string): Detection | undefined {
+  const gameDir = path.join(root, "game");
+  if (!fs.existsSync(gameDir) || !fs.statSync(gameDir).isDirectory()) return undefined;
+  const scriptFiles = listFiles(gameDir, /\.(rpy|rpyc|rpymc|rpa)$/i);
+  const renpyDir = path.join(root, "renpy");
+  const exeNames = fs.readdirSync(root).filter(name => /\.exe$/i.test(name));
+  const hasRenpySignal = fs.existsSync(renpyDir)
+    || scriptFiles.length > 0
+    || exeNames.some(name => /renpy|python/i.test(name));
+  if (!hasRenpySignal) return undefined;
+  const detectedBy = ["game/"];
+  if (fs.existsSync(renpyDir)) detectedBy.push("renpy/");
+  detectedBy.push(...scriptFiles.slice(0, 8).map(file => path.relative(root, file).replace(/\\/g, "/")));
+  return {
+    family: "REN_PY",
+    engine: "RENPY",
+    confidence: fs.existsSync(renpyDir) ? 0.95 : 0.85,
+    detectedBy,
+    dataFormat: "renpy",
+    dataRoot: normalizePath(gameDir),
+    dataFiles: scriptFiles,
+    encoding: "utf-8-or-compiled",
+    scriptRuntime: { language: "python", runtime: "renpy" }
+  };
+}
+
+function detectTyrano(root: string): Detection | undefined {
+  const indexHtml = path.join(root, "index.html");
+  const scenarioRoot = path.join(root, "data", "scenario");
+  const tyranoRoot = path.join(root, "tyrano");
+  const kag = path.join(root, "tyrano", "plugins", "kag", "kag.js");
+  const tyranoJs = path.join(root, "tyrano", "tyrano.js");
+  const hasTyranoSignal = fs.existsSync(indexHtml)
+    && (fs.existsSync(scenarioRoot) || fs.existsSync(kag) || fs.existsSync(tyranoJs));
+  if (!hasTyranoSignal) return undefined;
+  const scenarioFiles = fs.existsSync(scenarioRoot) ? listFiles(scenarioRoot, /\.ks$/i) : [];
+  const detectedBy = ["index.html"];
+  if (fs.existsSync(scenarioRoot)) detectedBy.push("data/scenario/");
+  if (fs.existsSync(kag)) detectedBy.push("tyrano/plugins/kag/kag.js");
+  if (fs.existsSync(tyranoJs)) detectedBy.push("tyrano/tyrano.js");
+  return {
+    family: "TYRANO",
+    engine: "TYRANO",
+    confidence: scenarioFiles.length > 0 ? 0.95 : 0.8,
+    detectedBy,
+    dataFormat: "tyrano",
+    dataRoot: normalizePath(path.join(root, "data")),
+    dataFiles: scenarioFiles,
+    encoding: "utf-8",
+    scriptRuntime: { language: "javascript", runtime: "tyrano" }
   };
 }
 
@@ -198,6 +262,7 @@ function rgssDetection(
     : undefined;
   const dataRoot = path.join(root, "Data");
   return {
+    family: "RPG_MAKER",
     engine,
     confidence: archive ? 0.9 : 0.8,
     detectedBy,

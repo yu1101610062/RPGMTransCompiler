@@ -20,7 +20,9 @@ import {
 import { builtInRuntimeTranslation, shouldTranslateRuntimeText } from "../runtime/watch.js";
 import { createProvider } from "../translation/providers.js";
 import { collectMvMzCandidates } from "./mvmzCandidates.js";
+import { collectRenpyCandidates } from "./renpyCandidates.js";
 import { collectRgssCandidates } from "./rgssCandidates.js";
+import { collectTyranoCandidates } from "./tyranoCandidates.js";
 import type { PretranslateOptions, PretranslateProgress, PretranslateResult, RuntimeTextCandidate } from "./types.js";
 
 const DEFAULT_BATCH_SIZE = 20;
@@ -193,6 +195,8 @@ function collectCandidates(profile: RuntimeProfile, issues: Issue[]): RuntimeTex
   try {
     if (profile.engine.name === "MV" || profile.engine.name === "MZ") return collectMvMzCandidates(profile);
     if (profile.engine.name === "XP" || profile.engine.name === "VX" || profile.engine.name === "VXA") return collectRgssCandidates(profile);
+    if (profile.engine.name === "RENPY") return collectRenpyCandidates(profile, issues);
+    if (profile.engine.name === "TYRANO") return collectTyranoCandidates(profile);
     issues.push(issue("pretranslate_engine_unsupported", "fatal", `Pretranslate does not support ${profile.engine.name}.`));
     return [];
   } catch (error) {

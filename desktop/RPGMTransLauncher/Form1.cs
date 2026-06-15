@@ -81,7 +81,7 @@ public sealed class Form1 : Form
         {
             Dock = DockStyle.Fill,
             TextAlign = ContentAlignment.MiddleCenter,
-            Text = "拖入游戏启动程序 Game.exe / RPG_RT.exe / nw.exe\n或点击选择要注入运行时翻译插件的游戏 exe",
+            Text = "拖入游戏启动程序 exe\n或点击选择要注入运行时翻译插件的游戏 exe",
             Font = new Font(Font.FontFamily, 13F, FontStyle.Bold),
             ForeColor = Color.FromArgb(38, 58, 86)
         };

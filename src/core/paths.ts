@@ -7,6 +7,7 @@ export const projectRoot = path.resolve(srcRoot, "..");
 export const defaultWorkRoot = process.env.RPGMTRANS_WORK_ROOT || path.join(projectRoot, "work");
 export const rgssBridgePath = path.join(projectRoot, "scripts", "rgss_bridge.rb");
 export const rgssRuntimeScriptPath = path.join(projectRoot, "scripts", "runtime_rgss.rb");
+export const renpyHelperPath = path.join(projectRoot, "scripts", "renpy_decompile.py");
 
 export function normalizePath(input: string): string {
   return path.resolve(input).replace(/\\/g, "/");

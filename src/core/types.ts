@@ -1,4 +1,4 @@
-export type EngineName = "RM2K" | "RM2K3" | "XP" | "VX" | "VXA" | "MV" | "MZ" | "UNKNOWN";
+export type EngineName = "RM2K" | "RM2K3" | "XP" | "VX" | "VXA" | "MV" | "MZ" | "RENPY" | "TYRANO" | "UNKNOWN";
 
 export type TranslationAction = "AUTO" | "REVIEW" | "SKIP" | "LOCKED";
 
@@ -22,20 +22,20 @@ export interface RuntimeProfile {
   extractedRoot: string;
   outputRoot: string;
   engine: {
-    family: "RPG_MAKER";
+    family: "RPG_MAKER" | "REN_PY" | "TYRANO";
     name: EngineName;
     detectedBy: string[];
     confidence: number;
   };
   data: {
-    format: "json" | "marshal" | "lcf" | "unknown";
+    format: "json" | "marshal" | "lcf" | "renpy" | "tyrano" | "unknown";
     encoding: string;
     root: string;
     files: string[];
   };
   scriptRuntime: {
-    language: "javascript" | "ruby" | "none" | "unknown";
-    runtime: "nwjs" | "rgss" | "rgss2" | "rgss3" | "none" | "unknown";
+    language: "javascript" | "ruby" | "python" | "none" | "unknown";
+    runtime: "nwjs" | "rgss" | "rgss2" | "rgss3" | "renpy" | "tyrano" | "none" | "unknown";
     engineVersion?: string;
   };
   archive?: {

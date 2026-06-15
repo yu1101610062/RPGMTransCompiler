@@ -125,7 +125,11 @@ export function validateRuntimeCommand(dbPath: string): { issues: number; fatal:
       "mvmz_plugins_js_not_registered",
       "mvmz_plugins_js_invalid",
       "rgss_scripts_missing",
-      "runtime_engine_unsupported"
+      "runtime_engine_unsupported",
+      "renpy_game_dir_missing",
+      "renpy_runtime_script_missing",
+      "tyrano_runtime_script_missing",
+      "tyrano_runtime_not_registered"
     ]);
     const preserved = db.allIssues().filter(item => !runtimeTypes.has(item.type));
     db.replaceIssues([...preserved, ...issues]);

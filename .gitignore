@@ -31,7 +31,11 @@ RPG_RT.exe
 nw.exe
 *.sav
 *.rpgsave
+*.save
 *.rvdata2.bak
+*.rpa
+*.rpyc
+*.rpymc
 tools/
 desktop/**/bin/
 desktop/**/obj/

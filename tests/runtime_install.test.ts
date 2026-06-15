@@ -43,4 +43,44 @@ describe("runtime install in place", () => {
     expect(fs.existsSync(runtimeManifestPath(game))).toBe(false);
     expect(readRuntimeCache(runtimeCachePath(game)).get(key)?.target).toBe("新游戏");
   });
+
+  it("injects and restores a Ren'Py runtime script", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "rpgmtrans-renpy-install-"));
+    fs.mkdirSync(path.join(root, "game"), { recursive: true });
+    fs.mkdirSync(path.join(root, "renpy"), { recursive: true });
+    fs.writeFileSync(path.join(root, "game", "script.rpy"), "\"Hello\"\n", "utf8");
+    fs.writeFileSync(path.join(root, "Game.exe"), "", "utf8");
+
+    const { profile } = scanProject(root, { db: path.join(root, "project.sqlite") });
+    const result = installRuntime(profile);
+    expect(result.issues.filter(issue => issue.severity === "fatal")).toHaveLength(0);
+    const runtimeScript = path.join(root, "game", "rpgmtrans_runtime.rpy");
+    expect(fs.existsSync(runtimeScript)).toBe(true);
+    expect(fs.readFileSync(runtimeScript, "utf8")).toContain("RPGMTransRuntime bridge for Ren'Py");
+
+    const restored = restoreRuntime(profile);
+    expect(restored.issues.filter(issue => issue.severity === "fatal" || issue.severity === "error")).toHaveLength(0);
+    expect(fs.existsSync(runtimeScript)).toBe(false);
+  });
+
+  it("injects and restores a Tyrano loadjs runtime", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "rpgmtrans-tyrano-install-"));
+    fs.mkdirSync(path.join(root, "data", "scenario"), { recursive: true });
+    fs.mkdirSync(path.join(root, "tyrano", "plugins", "kag"), { recursive: true });
+    const first = path.join(root, "data", "scenario", "first.ks");
+    fs.writeFileSync(path.join(root, "index.html"), "<html></html>", "utf8");
+    fs.writeFileSync(first, "Hello\n", "utf8");
+    fs.writeFileSync(path.join(root, "tyrano", "plugins", "kag", "kag.js"), "", "utf8");
+
+    const { profile } = scanProject(root, { db: path.join(root, "project.sqlite") });
+    const result = installRuntime(profile);
+    expect(result.issues.filter(issue => issue.severity === "fatal")).toHaveLength(0);
+    expect(fs.existsSync(path.join(root, "data", "others", "rpgmtrans_runtime.js"))).toBe(true);
+    expect(fs.readFileSync(first, "utf8")).toContain('[loadjs storage="rpgmtrans_runtime.js"]');
+
+    const restored = restoreRuntime(profile);
+    expect(restored.issues.filter(issue => issue.severity === "fatal" || issue.severity === "error")).toHaveLength(0);
+    expect(fs.existsSync(path.join(root, "data", "others", "rpgmtrans_runtime.js"))).toBe(false);
+    expect(fs.readFileSync(first, "utf8")).toBe("Hello\n");
+  });
 });

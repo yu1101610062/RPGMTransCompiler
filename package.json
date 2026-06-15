@@ -2,7 +2,7 @@
   "name": "rpgmtrans-compiler",
   "version": "0.1.0",
   "type": "module",
-  "description": "Local runtime translation bridge and pretranslation cache tool for RPG Maker desktop games.",
+  "description": "Local runtime translation bridge and pretranslation cache tool for desktop RPG/VN games.",
   "bin": {
     "rpgmtrans": "./dist/cli.js"
   },

@@ -1,8 +1,10 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import zlib from "node:zlib";
 import { describe, expect, it } from "vitest";
 import type { RuntimeProfile } from "../src/core/types.js";
+import { scanProject } from "../src/engines/scanner.js";
 import { pretranslateRuntime } from "../src/pretranslate/pretranslate.js";
 import { collectMvMzCandidates } from "../src/pretranslate/mvmzCandidates.js";
 import {
@@ -76,6 +78,46 @@ describe("pretranslate cache", () => {
     expect(sidecar.phase).toBe("done");
     expect(sidecar.translated).toBe(result.translated);
     expect(sidecar.batchesCompleted).toBe(sidecar.batchesTotal);
+  });
+
+  it("pretranslates Ren'Py games that only contain rpyc files without writing source to the game directory", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "rpgmtrans-renpy-rpyc-"));
+    fs.mkdirSync(path.join(root, "game"), { recursive: true });
+    fs.mkdirSync(path.join(root, "renpy"), { recursive: true });
+    fs.writeFileSync(path.join(root, "Game.exe"), "", "utf8");
+    const payload = zlib.deflateSync(Buffer.from("Okay, I see now\nYou are a cute little shrimp", "utf8"));
+    fs.writeFileSync(path.join(root, "game", "script.rpyc"), Buffer.concat([Buffer.from("RENPY RPC2\n"), payload]));
+    const { profile } = scanProject(root, { db: path.join(root, "project.sqlite") });
+
+    const result = await pretranslateRuntime(profile, "mock", { batchSize: 2, concurrency: 2 });
+    expect(result.translated).toBeGreaterThan(0);
+    expect(fs.existsSync(path.join(root, "game", "script.rpy"))).toBe(false);
+    const cache = readRuntimeCache(runtimeCachePath(root));
+    expect([...cache.values()].some(entry => entry.source.includes("Okay, I see now"))).toBe(true);
+  });
+
+  it("pretranslates Tyrano scenario text and visible tag parameters", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "rpgmtrans-tyrano-pre-"));
+    fs.mkdirSync(path.join(root, "data", "scenario"), { recursive: true });
+    fs.mkdirSync(path.join(root, "tyrano", "plugins", "kag"), { recursive: true });
+    fs.writeFileSync(path.join(root, "index.html"), "<html></html>", "utf8");
+    fs.writeFileSync(path.join(root, "tyrano", "plugins", "kag", "kag.js"), "", "utf8");
+    fs.writeFileSync(path.join(root, "data", "scenario", "first.ks"), [
+      "Hello [emb exp=\"f.name\"]!",
+      "[glink text=\"Start\" target=\"*start\"]",
+      "[macro name=\"skipme\"]",
+      "Do not scan this macro",
+      "[endmacro]",
+      ""
+    ].join("\n"), "utf8");
+    const { profile } = scanProject(root, { db: path.join(root, "project.sqlite") });
+
+    const result = await pretranslateRuntime(profile, "mock");
+    expect(result.translated).toBeGreaterThanOrEqual(2);
+    const cache = readRuntimeCache(runtimeCachePath(root));
+    expect([...cache.values()].some(entry => entry.source === "Hello [emb exp=\"f.name\"]!")).toBe(true);
+    expect([...cache.values()].some(entry => entry.source === "Start")).toBe(true);
+    expect([...cache.values()].some(entry => entry.source.includes("macro"))).toBe(false);
   });
 });
 
