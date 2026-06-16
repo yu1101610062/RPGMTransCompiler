@@ -156,12 +156,12 @@ function usage(): void {
   rpgmtrans scan SOURCE [--target zh-Hans] [--db DB]
   rpgmtrans install-runtime DB
   rpgmtrans restore-runtime DB
-  rpgmtrans watch DB [--provider mock|deepseek|openai] [--once] [--poll-ms 500] [--batch-size 20] [--concurrency 100] [--no-skip-translated]
-  rpgmtrans pretranslate DB [--provider mock|deepseek|openai] [--mode safe] [--batch-size 20] [--concurrency 100] [--progress] [--overwrite]
+  rpgmtrans watch DB [--provider mock|configured|openai-responses|openai-chat|anthropic|google] [--once] [--poll-ms 500] [--batch-size 20] [--concurrency 100] [--no-skip-translated]
+  rpgmtrans pretranslate DB [--provider mock|configured|openai-responses|openai-chat|anthropic|google] [--mode safe] [--batch-size 20] [--concurrency 100] [--progress] [--overwrite]
   rpgmtrans pretranslate-estimate DB [--mode safe] [--batch-size 20] [--overwrite] [--input-token-price 0] [--output-token-price 0]
   rpgmtrans validate-runtime DB
   rpgmtrans report DB [--out REPORT_DIR]
-  rpgmtrans run SOURCE [--provider mock|deepseek|openai] [--target zh-Hans] [--db DB] [--no-launch]
+  rpgmtrans run SOURCE [--provider mock|configured|openai-responses|openai-chat|anthropic|google] [--target zh-Hans] [--db DB] [--no-launch]
   rpgmtrans web DB [--port 5177]`);
 }
 

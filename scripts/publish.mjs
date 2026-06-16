@@ -7,9 +7,11 @@ import { fileURLToPath } from "node:url";
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(scriptDir, "..");
 const project = path.join(root, "desktop", "RPGMTransLauncher", "RPGMTransLauncher.csproj");
-const publishDir = path.join(root, "desktop", "RPGMTransLauncher", "bin", "Release", "net8.0-windows", "win-x64", "publish");
+const buildDir = path.join(root, "desktop", "RPGMTransLauncher", "bin", "Release", "net8.0-windows10.0.19041.0", "win-x64");
+const publishDir = path.join(root, "desktop", "RPGMTransLauncher", "bin", "Release", "net8.0-windows10.0.19041.0", "win-x64", "publish");
 
 run("npm", ["run", "build"], root);
+rm(publishDir);
 run("dotnet", [
   "publish",
   project,
@@ -18,15 +20,24 @@ run("dotnet", [
   "-r",
   "win-x64",
   "--self-contained",
-  "false",
-  "-p:PublishSingleFile=true"
+  "true",
+  "-o",
+  publishDir
 ], root);
 
+copyWinUIResources();
 syncRuntimeFiles();
 installProductionDependencies();
 copyNodeRuntime();
 
 console.log(`Published RPGMTransLauncher to ${publishDir}`);
+
+function copyWinUIResources() {
+  for (const name of fs.readdirSync(buildDir)) {
+    if (!/\.(xbf|pri)$/i.test(name)) continue;
+    copyFileIfExists(path.join(buildDir, name), path.join(publishDir, name));
+  }
+}
 
 function syncRuntimeFiles() {
   fs.mkdirSync(publishDir, { recursive: true });
