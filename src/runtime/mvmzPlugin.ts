@@ -42,9 +42,18 @@ const PLUGIN = String.raw`/*:
   var dirtyRefresh = false;
   var inDraw = false;
   var activeMessageWindow = null;
+  var trackedWindows = [];
+  var nextBitmapId = 1;
+  var bitmapFragments = Object.create(null);
+  var bitmapFlushScheduled = false;
+  var cjkFallbackFonts = '"Microsoft YaHei", SimHei, "Microsoft JhengHei", "Heiti TC", "Noto Sans CJK SC", sans-serif';
 
   function mkdirp(dir) {
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  }
+
+  function logError(error) {
+    try { fs.appendFileSync(path.join(diagDir, "plugin.log"), String(error && error.stack || error) + "\n", "utf8"); } catch (_) {}
   }
 
   mkdirp(requestDir);
@@ -80,19 +89,64 @@ const PLUGIN = String.raw`/*:
     return String(input == null ? "" : input).replace(/\r\n/g, "\n").replace(/\r/g, "\n").replace(/[ \t]+/g, " ").trim();
   }
 
+  function placeholderRegex() {
+    return /[\\\x1b][VvNnPpCcIiSs]\[\d+\]|[\\\x1b][A-Za-z]{1,12}\[[^\]\r\n]{0,80}\]|[\\\x1b][Gg.!|><^{}\\]|#\{[^}]*\}|\$\{[^}]*\}|%(?:\d+\$)?[-+#0 ]*(?:\d+|\*)?(?:\.(?:\d+|\*))?[bcdeEufFgGosxX]|%\d+|<\/?[A-Za-z][^>\n]{0,120}>|\{\{[^{}\n]{1,80}\}\}|\{[A-Za-z_][A-Za-z0-9_.-]{0,80}\}/g;
+  }
+
+  function visibleText(input) {
+    return normalizeText(input).replace(placeholderRegex(), "").trim();
+  }
+
+  function hasNaturalText(text) {
+    return /[A-Za-z0-9\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/.test(text);
+  }
+
+  function targetNeedsCjkFont() {
+    return /^(zh|ja|ko)(?:-|$)/i.test(TARGET_LANG);
+  }
+
+  function containsCjkText(text) {
+    return /[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/.test(String(text == null ? "" : text));
+  }
+
+  function withCjkFontFallback(face) {
+    var current = String(face || "GameFont");
+    if (!targetNeedsCjkFont()) return current;
+    if (/Microsoft YaHei|SimHei|Microsoft JhengHei|Heiti TC|Noto Sans CJK/i.test(current)) return current;
+    return current + ", " + cjkFallbackFonts;
+  }
+
+  function applyRuntimeFontFallback(win) {
+    try {
+      if (win && win.contents) win.contents.fontFace = withCjkFontFallback(win.contents.fontFace || (typeof win.standardFontFace === "function" ? win.standardFontFace() : "GameFont"));
+    } catch (_) {}
+  }
+
+  function hasPendingMessageInput() {
+    try {
+      if (!$gameMessage) return false;
+      if (typeof $gameMessage.isChoice === "function" && $gameMessage.isChoice()) return true;
+      if (typeof $gameMessage.isNumberInput === "function" && $gameMessage.isNumberInput()) return true;
+      if (typeof $gameMessage.isItemChoice === "function" && $gameMessage.isItemChoice()) return true;
+    } catch (_) {}
+    return false;
+  }
+
   function shouldRecordText(input) {
     var text = normalizeText(input);
     if (!text) return false;
     if (text.indexOf("[" + TARGET_LANG + "]") === 0) return false;
-    var ascii = /^[\x00-\x7f]+$/.test(text);
-    if (ascii && text.length === 1) return false;
-    if (ascii && !/[A-Za-z]/.test(text)) return false;
+    if (visibleText(text).length <= 1) return false;
+    if (/^[A-Za-z0-9_./\\:@%+\- ]+\.(png|jpe?g|webp|gif|bmp|ogg|m4a|mp3|wav|flac|json|js|mjs|css|html?|ttf|otf|woff2?|rpgmvp|rpgmvo|rpgmvm)$/i.test(text)) return false;
+    if (/^(?:[A-Za-z]:)?[A-Za-z0-9_. -]+(?:[\\/][A-Za-z0-9_. -]+)+$/.test(text)) return false;
+    if (/^<PH_\d+\/>$/.test(text) || /^<\/?[A-Za-z][^>\n]{0,120}>$/.test(text)) return false;
+    if (!hasNaturalText(text)) return false;
     return true;
   }
 
   function placeholderSignature(input) {
     var text = String(input);
-    var re = /[\\\x1b¥￥][VvNnPpCcIiSs]\[\d+\]|[\\\x1b¥￥][A-Za-z]{1,12}\[[^\]\r\n]{0,80}\]|[\\\x1b¥￥][Gg.!|><^{}\\]|#\{[^}]*\}|\$\{[^}]*\}|%(?:\d+\$)?[-+#0 ]*(?:\d+|\*)?(?:\.(?:\d+|\*))?[bcdeEufFgGosxX]|%\d+|<\/?[A-Za-z][^>\n]{0,120}>|\{\{[^{}\n]{1,80}\}\}|\{[A-Za-z_][A-Za-z0-9_.-]{0,80}\}/g;
+    var re = placeholderRegex();
     var out = [];
     var match;
     while ((match = re.exec(text))) out.push(hex(match[0]));
@@ -148,10 +202,7 @@ const PLUGIN = String.raw`/*:
       if (!line || line.charAt(0) === "#") continue;
       var parts = line.split("\t");
       if (parts.length < 11 || parts[0] !== "1") continue;
-      var key = parts[2];
-      var sourceHex = parts[7];
-      var targetHex = parts[8];
-      map[key] = { sourceHex: sourceHex, target: unhex(targetHex) };
+      map[parts[2]] = { sourceHex: parts[7], target: unhex(parts[8]) };
     }
     return map;
   }
@@ -168,17 +219,23 @@ const PLUGIN = String.raw`/*:
       translations = parseCache();
       dirtyRefresh = true;
     } catch (error) {
-      try { fs.appendFileSync(path.join(diagDir, "plugin.log"), String(error.stack || error) + "\n", "utf8"); } catch (_) {}
+      logError(error);
     }
+  }
+
+  function cacheSourceMatches(entry, source, sourceHex) {
+    if (!entry) return false;
+    if (entry.sourceHex === sourceHex) return true;
+    try { return normalizeText(unhex(entry.sourceHex)) === normalizeText(source); } catch (_) { return false; }
   }
 
   function lookup(source, sk, tk) {
     reloadCacheIfNeeded(false);
     var sourceHex = hex(source);
     var surface = translations[sk];
-    if (surface && surface.sourceHex === sourceHex) return surface.target;
+    if (cacheSourceMatches(surface, source, sourceHex)) return surface.target;
     var text = translations[tk];
-    if (text && text.sourceHex === sourceHex) return text.target;
+    if (cacheSourceMatches(text, source, sourceHex)) return text.target;
     return null;
   }
 
@@ -219,23 +276,40 @@ const PLUGIN = String.raw`/*:
     return { textKey: tk, surfaceKey: sk, target: null };
   }
 
+  function trackWindow(win) {
+    if (!win) return;
+    markWindowContents(win);
+    applyRuntimeFontFallback(win);
+    if (trackedWindows.indexOf(win) < 0) trackedWindows.push(win);
+    if (trackedWindows.length > 300) trackedWindows.shift();
+  }
+
+  function untrackWindow(win) {
+    var index = trackedWindows.indexOf(win);
+    if (index >= 0) trackedWindows.splice(index, 1);
+  }
+
+  function markWindowContents(win) {
+    try {
+      if (win && win.contents) win.contents._rpgmtransRuntimeOwner = win;
+    } catch (_) {}
+  }
+
   function safeRefreshWindows() {
     if (!dirtyRefresh) return;
     dirtyRefresh = false;
     try {
       refreshActiveMessageWindow();
-      var scene = SceneManager._scene;
-      if (!scene || !scene.children) return;
-      var stack = scene.children.slice();
-      while (stack.length) {
-        var node = stack.shift();
-        if (!node) continue;
-        if (node.children) stack = stack.concat(node.children);
-        if (typeof node.refresh === "function") {
-          try { node.refresh(); } catch (_) {}
-        }
+      var alive = [];
+      for (var i = 0; i < trackedWindows.length; i++) {
+        var win = trackedWindows[i];
+        if (!win || win._destroyed) continue;
+        alive.push(win);
       }
-    } catch (error) {}
+      trackedWindows = alive;
+    } catch (error) {
+      logError(error);
+    }
   }
 
   function refreshActiveMessageWindow() {
@@ -243,19 +317,27 @@ const PLUGIN = String.raw`/*:
     if (!win || !win._rpgmtransRuntimeMessageSource || !win._rpgmtransRuntimeMessageProbe) return;
     try {
       if (win._rpgmtransRuntimeApplied) return;
-      if (win.openness <= 0 && !win.isOpen()) return;
+      if (win.openness <= 0 && typeof win.isOpen === "function" && !win.isOpen()) return;
       var source = win._rpgmtransRuntimeMessageSource;
       var target = lookupProbe(win._rpgmtransRuntimeMessageProbe, source);
       if (target == null) return;
+      if (win._rpgmtransRuntimeMessageSkipRepaint || hasPendingMessageInput()) {
+        if (repaintMessageWindowBody(win, target)) win._rpgmtransRuntimeApplied = true;
+        return;
+      }
       win._rpgmtransRuntimeApplied = true;
       repaintMessageWindow(win, target);
     } catch (error) {
-      try { fs.appendFileSync(path.join(diagDir, "plugin.log"), String(error.stack || error) + "\n", "utf8"); } catch (_) {}
+      logError(error);
     }
   }
 
   function repaintMessageWindow(win, target) {
     if (!win || !win.contents || typeof win.newPage !== "function") return;
+    if (win._rpgmtransRuntimeMessageSkipRepaint || hasPendingMessageInput()) {
+      repaintMessageWindowBody(win, target);
+      return;
+    }
     if (win._choiceWindow && win._choiceWindow.active) return;
     if (win._numberWindow && win._numberWindow.active) return;
     if (win._itemWindow && win._itemWindow.active) return;
@@ -267,6 +349,7 @@ const PLUGIN = String.raw`/*:
     };
     inDraw = true;
     try {
+      applyRuntimeFontFallback(win);
       win.pause = false;
       if (typeof win.updatePlacement === "function") win.updatePlacement();
       if (typeof win.updateBackground === "function") win.updateBackground();
@@ -289,17 +372,258 @@ const PLUGIN = String.raw`/*:
     }
   }
 
+  function repaintMessageWindowBody(win, target) {
+    if (!win || !win.contents || typeof win.newPage !== "function" || typeof win.processCharacter !== "function") return false;
+    var oldTextState = win._textState;
+    var oldPause = win.pause;
+    var oldShowFast = win._showFast;
+    var oldLineShowFast = win._lineShowFast;
+    var oldWaitCount = win._waitCount;
+    var textState = {
+      index: 0,
+      text: typeof win.convertEscapeCharacters === "function" ? win.convertEscapeCharacters(String(target)) : String(target)
+    };
+    inDraw = true;
+    try {
+      applyRuntimeFontFallback(win);
+      if (typeof win.updatePlacement === "function") win.updatePlacement();
+      if (typeof win.updateBackground === "function") win.updateBackground();
+      if (typeof win.open === "function") win.open();
+      win.pause = false;
+      win._waitCount = 0;
+      win._showFast = true;
+      win._lineShowFast = true;
+      win._textState = textState;
+      win.newPage(textState);
+      var guard = 0;
+      var maxGuard = Math.max(512, textState.text.length * 4);
+      while (win._textState && typeof win.isEndOfText === "function" && !win.isEndOfText(win._textState) && guard < maxGuard) {
+        guard++;
+        if (typeof win.needsNewPage === "function" && win.needsNewPage(win._textState)) win.newPage(win._textState);
+        win.processCharacter(win._textState);
+        if (win._waitCount > 0) win._waitCount = 0;
+        if (win.pause) win.pause = false;
+      }
+      return true;
+    } catch (error) {
+      logError(error);
+      return false;
+    } finally {
+      win._textState = oldTextState;
+      win.pause = oldPause;
+      win._showFast = oldShowFast;
+      win._lineShowFast = oldLineShowFast;
+      win._waitCount = oldWaitCount;
+      inDraw = false;
+    }
+  }
+
+  function patchInterpreterMessageLines(interpreter) {
+    try {
+      if (!interpreter || !$gameMessage || (typeof $gameMessage.isBusy === "function" && $gameMessage.isBusy())) return null;
+      var list = interpreter._list;
+      var index = interpreter._index;
+      if (!list || typeof index !== "number") return null;
+      var lineIndexes = [];
+      var lines = [];
+      for (var i = index + 1; list[i] && list[i].code === 401; i++) {
+        lineIndexes.push(i);
+        lines.push(String(list[i].parameters && list[i].parameters[0] != null ? list[i].parameters[0] : ""));
+      }
+      if (!lines.length) return null;
+      var source = lines.join("\n");
+      var probe = record(source, "message_event", interpreter, "", "");
+      if (probe.target == null) return null;
+      var target = String(probe.target);
+      var targetLines = target.split("\n");
+      var originals = [];
+      for (var n = 0; n < lineIndexes.length; n++) {
+        var command = list[lineIndexes[n]];
+        originals.push(command.parameters[0]);
+        if (n === lineIndexes.length - 1 && targetLines.length > lineIndexes.length) {
+          command.parameters[0] = targetLines.slice(n).join("\n");
+        } else {
+          command.parameters[0] = targetLines[n] != null ? targetLines[n] : "";
+        }
+      }
+      $gameMessage._rpgmtransRuntimeTranslatedText = target;
+      return function restoreMessageLines() {
+        for (var r = 0; r < lineIndexes.length; r++) {
+          if (list[lineIndexes[r]] && list[lineIndexes[r]].parameters) list[lineIndexes[r]].parameters[0] = originals[r];
+        }
+      };
+    } catch (error) {
+      logError(error);
+      return null;
+    }
+  }
+
+  function bitmapId(bitmap) {
+    if (!bitmap._rpgmtransRuntimeBitmapId) bitmap._rpgmtransRuntimeBitmapId = nextBitmapId++;
+    return bitmap._rpgmtransRuntimeBitmapId;
+  }
+
+  function bitmapFontSignature(bitmap) {
+    return [
+      bitmap.fontFace || "",
+      bitmap.fontSize || "",
+      bitmap.textColor || "",
+      bitmap.outlineColor || "",
+      bitmap.outlineWidth || ""
+    ].join("|");
+  }
+
+  function shouldAggregateBitmapText(text) {
+    var raw = String(text == null ? "" : text);
+    return raw.length <= 2 && shouldRecordText(raw);
+  }
+
+  function queueBitmapFragment(bitmap, text, x, y, maxWidth, lineHeight, align) {
+    var owner = bitmap._rpgmtransRuntimeOwner || bitmap;
+    var key = bitmapId(bitmap) + ":" + Math.round(Number(y) || 0) + ":" + bitmapFontSignature(bitmap) + ":" + String(align || "");
+    if (!bitmapFragments[key]) bitmapFragments[key] = [];
+    bitmapFragments[key].push({
+      bitmap: bitmap,
+      owner: owner,
+      text: String(text),
+      x: Number(x) || 0,
+      y: Number(y) || 0,
+      maxWidth: Number(maxWidth) || 0,
+      lineHeight: Number(lineHeight) || 0,
+      align: align || ""
+    });
+    if (!bitmapFlushScheduled) {
+      bitmapFlushScheduled = true;
+      setTimeout(flushBitmapFragments, 0);
+    }
+  }
+
+  function flushBitmapFragments() {
+    bitmapFlushScheduled = false;
+    var groups = bitmapFragments;
+    bitmapFragments = Object.create(null);
+    for (var key in groups) {
+      if (!Object.prototype.hasOwnProperty.call(groups, key)) continue;
+      var group = groups[key];
+      if (!group || group.length < 2) continue;
+      group.sort(function(a, b) { return a.x - b.x; });
+      var source = group.map(function(item) { return item.text; }).join("");
+      if (!shouldRecordText(source)) continue;
+      var first = group[0];
+      var last = group[group.length - 1];
+      var width = Math.max(last.x + (last.maxWidth || 0) - first.x, group.reduce(function(sum, item) { return sum + (item.maxWidth || 0); }, 0));
+      var probe = record(source, "bitmapBatch", first.owner, width, first.align);
+      if (probe.target != null && first.bitmap && typeof first.bitmap.drawText === "function") {
+        inDraw = true;
+        var oldFontFace = first.bitmap.fontFace;
+        try {
+          if (containsCjkText(probe.target)) first.bitmap.fontFace = withCjkFontFallback(first.bitmap.fontFace);
+          if (typeof first.bitmap.clearRect === "function") first.bitmap.clearRect(first.x, first.y, Math.max(width, first.maxWidth || 1), first.lineHeight || 36);
+          first.bitmap.drawText(probe.target, first.x, first.y, Math.max(width, first.maxWidth || 1), first.lineHeight || 36, first.align);
+        } catch (error) {
+          logError(error);
+        } finally {
+          first.bitmap.fontFace = oldFontFace;
+          inDraw = false;
+        }
+      }
+    }
+  }
+
   var _SceneManager_updateMain = SceneManager.updateMain;
   SceneManager.updateMain = function() {
+    flushBitmapFragments();
     reloadCacheIfNeeded(false);
     safeRefreshWindows();
     return _SceneManager_updateMain.apply(this, arguments);
   };
 
+  if (SceneManager.changeScene) {
+    var _SceneManager_changeScene = SceneManager.changeScene;
+    SceneManager.changeScene = function() {
+      dirtyRefresh = true;
+      return _SceneManager_changeScene.apply(this, arguments);
+    };
+  }
+
+  if (typeof Scene_Base !== "undefined" && Scene_Base.prototype && Scene_Base.prototype.terminate) {
+    var _SceneBase_terminate = Scene_Base.prototype.terminate;
+    Scene_Base.prototype.terminate = function() {
+      dirtyRefresh = true;
+      return _SceneBase_terminate.apply(this, arguments);
+    };
+  }
+
+  if (typeof PIXI !== "undefined" && PIXI.Container && PIXI.Container.prototype) {
+    if (PIXI.Container.prototype.removeChild) {
+      var _PIXI_removeChild = PIXI.Container.prototype.removeChild;
+      PIXI.Container.prototype.removeChild = function(child) {
+        if (child) untrackWindow(child);
+        return _PIXI_removeChild.apply(this, arguments);
+      };
+    }
+    if (PIXI.Container.prototype.destroy) {
+      var _PIXI_destroy = PIXI.Container.prototype.destroy;
+      PIXI.Container.prototype.destroy = function() {
+        untrackWindow(this);
+        return _PIXI_destroy.apply(this, arguments);
+      };
+    }
+  }
+
   if (typeof Window_Base !== "undefined") {
+    function patchStandardFontFace(ctor) {
+      if (!ctor || !ctor.prototype || typeof ctor.prototype.standardFontFace !== "function" || ctor.prototype._rpgmtransFontFallbackPatched) return;
+      var oldStandardFontFace = ctor.prototype.standardFontFace;
+      ctor.prototype.standardFontFace = function() {
+        return withCjkFontFallback(oldStandardFontFace.apply(this, arguments));
+      };
+      ctor.prototype._rpgmtransFontFallbackPatched = true;
+    }
+
+    patchStandardFontFace(Window_Base);
+    if (typeof Window_Message !== "undefined") patchStandardFontFace(Window_Message);
+    if (typeof Window_ChoiceList !== "undefined") patchStandardFontFace(Window_ChoiceList);
+    if (typeof Window_NameBox !== "undefined") patchStandardFontFace(Window_NameBox);
+    if (typeof Window_ScrollText !== "undefined") patchStandardFontFace(Window_ScrollText);
+
+    if (Window_Base.prototype.createContents) {
+      var _createContents = Window_Base.prototype.createContents;
+      Window_Base.prototype.createContents = function() {
+        var result = _createContents.apply(this, arguments);
+        trackWindow(this);
+        return result;
+      };
+    }
+
+    if (Window_Base.prototype.refresh) {
+      var _refresh = Window_Base.prototype.refresh;
+      Window_Base.prototype.refresh = function() {
+        trackWindow(this);
+        return _refresh.apply(this, arguments);
+      };
+    }
+
+    if (Window_Base.prototype.update) {
+      var _update = Window_Base.prototype.update;
+      Window_Base.prototype.update = function() {
+        trackWindow(this);
+        return _update.apply(this, arguments);
+      };
+    }
+
+    if (Window_Base.prototype.destroy) {
+      var _destroy = Window_Base.prototype.destroy;
+      Window_Base.prototype.destroy = function() {
+        untrackWindow(this);
+        return _destroy.apply(this, arguments);
+      };
+    }
+
     var _drawText = Window_Base.prototype.drawText;
     Window_Base.prototype.drawText = function(text, x, y, maxWidth, align) {
       if (inDraw) return _drawText.apply(this, arguments);
+      trackWindow(this);
       var probe = record(text, "drawText", this, maxWidth, align || "");
       inDraw = true;
       try {
@@ -312,6 +636,7 @@ const PLUGIN = String.raw`/*:
     var _drawTextEx = Window_Base.prototype.drawTextEx;
     Window_Base.prototype.drawTextEx = function(text, x, y) {
       if (inDraw) return _drawTextEx.apply(this, arguments);
+      trackWindow(this);
       var width = this.contents ? this.contents.width : "";
       var probe = record(text, "drawTextEx", this, width, "");
       inDraw = true;
@@ -326,28 +651,137 @@ const PLUGIN = String.raw`/*:
   if (typeof Window_Message !== "undefined") {
     var _startMessage = Window_Message.prototype.startMessage;
     Window_Message.prototype.startMessage = function() {
+      var oldAllText = null;
+      var patchedAllText = false;
+      var pendingBodyTarget = null;
       try {
         activeMessageWindow = this;
+        trackWindow(this);
         var text = $gameMessage && $gameMessage.allText ? $gameMessage.allText() : "";
-        var width = this.contents ? this.contents.width : "";
-        var probe = record(text, "message", this, width, "");
-        this._rpgmtransRuntimeMessageSource = text;
-        this._rpgmtransRuntimeMessageProbe = probe;
-        this._rpgmtransRuntimeApplied = probe.target != null;
-        if (probe.target != null && $gameMessage && $gameMessage._texts) {
-          $gameMessage._texts = String(probe.target).split("\n");
+        var alreadyTranslated = $gameMessage && $gameMessage._rpgmtransRuntimeTranslatedText === text;
+        if (alreadyTranslated) {
+          this._rpgmtransRuntimeMessageSource = text;
+          this._rpgmtransRuntimeMessageProbe = null;
+          this._rpgmtransRuntimeMessageSkipRepaint = true;
+          this._rpgmtransRuntimeApplied = true;
+          this._rpgmtransRuntimeMessageUpdateSource = text;
+          applyRuntimeFontFallback(this);
+        } else {
+          var width = this.contents ? this.contents.width : "";
+          var probe = record(text, "message", this, width, "");
+          var skipRepaint = hasPendingMessageInput();
+          this._rpgmtransRuntimeMessageSource = text;
+          this._rpgmtransRuntimeMessageProbe = probe;
+          this._rpgmtransRuntimeMessageSkipRepaint = skipRepaint;
+          this._rpgmtransRuntimeApplied = false;
+          this._rpgmtransRuntimeMessageUpdateSource = text;
+          if (!skipRepaint && probe.target != null && $gameMessage && typeof $gameMessage.allText === "function") {
+            applyRuntimeFontFallback(this);
+            oldAllText = $gameMessage.allText;
+            var targetText = String(probe.target);
+            $gameMessage.allText = function() { return targetText; };
+            patchedAllText = true;
+            this._rpgmtransRuntimeApplied = true;
+          } else if (skipRepaint && probe.target != null) {
+            pendingBodyTarget = probe.target;
+          }
         }
-      } catch (error) {}
-      return _startMessage.apply(this, arguments);
+      } catch (error) {
+        logError(error);
+      }
+      var result;
+      try {
+        result = _startMessage.apply(this, arguments);
+      } finally {
+        if (patchedAllText && $gameMessage) $gameMessage.allText = oldAllText;
+      }
+      if (pendingBodyTarget != null && repaintMessageWindowBody(this, pendingBodyTarget)) this._rpgmtransRuntimeApplied = true;
+      return result;
     };
+
+    if (Window_Message.prototype.updateMessage) {
+      var _updateMessage = Window_Message.prototype.updateMessage;
+      Window_Message.prototype.updateMessage = function() {
+        try {
+          var text = $gameMessage && $gameMessage.allText ? $gameMessage.allText() : "";
+          if (text && text !== this._rpgmtransRuntimeMessageUpdateSource) {
+            var width = this.contents ? this.contents.width : "";
+            var probe = record(text, "message_update", this, width, "");
+            this._rpgmtransRuntimeMessageUpdateSource = text;
+            if (!this._rpgmtransRuntimeApplied && !this._rpgmtransRuntimeMessageSkipRepaint && !hasPendingMessageInput() && probe.target != null) {
+              this._rpgmtransRuntimeApplied = true;
+              repaintMessageWindow(this, probe.target);
+            }
+          }
+        } catch (error) {
+          logError(error);
+        }
+        return _updateMessage.apply(this, arguments);
+      };
+    }
 
     var _terminateMessage = Window_Message.prototype.terminateMessage;
     Window_Message.prototype.terminateMessage = function() {
       if (activeMessageWindow === this) activeMessageWindow = null;
       this._rpgmtransRuntimeMessageSource = null;
       this._rpgmtransRuntimeMessageProbe = null;
+      this._rpgmtransRuntimeMessageUpdateSource = null;
+      this._rpgmtransRuntimeMessageSkipRepaint = false;
       this._rpgmtransRuntimeApplied = false;
+      if ($gameMessage) $gameMessage._rpgmtransRuntimeTranslatedText = null;
       return _terminateMessage.apply(this, arguments);
+    };
+  }
+
+  if (typeof Game_Interpreter !== "undefined" && Game_Interpreter.prototype && Game_Interpreter.prototype.command101) {
+    var _interpreterCommand101 = Game_Interpreter.prototype.command101;
+    Game_Interpreter.prototype.command101 = function() {
+      var restore = patchInterpreterMessageLines(this);
+      try {
+        return _interpreterCommand101.apply(this, arguments);
+      } finally {
+        if (restore) restore();
+      }
+    };
+  }
+
+  if (typeof Window_Command !== "undefined" && Window_Command.prototype && Window_Command.prototype.drawItem) {
+    var _commandDrawItem = Window_Command.prototype.drawItem;
+    Window_Command.prototype.drawItem = function(index) {
+      if (inDraw || typeof this.commandName !== "function") return _commandDrawItem.apply(this, arguments);
+      trackWindow(this);
+      var source = this.commandName(index);
+      var rect = typeof this.itemRectForText === "function" ? this.itemRectForText(index) : null;
+      var width = rect ? rect.width : (this.contents ? this.contents.width : "");
+      var probe = record(source, "command", this, width, "");
+      if (probe.target == null) return _commandDrawItem.apply(this, arguments);
+      applyRuntimeFontFallback(this);
+      var originalCommandName = this.commandName;
+      var target = probe.target;
+      this.commandName = function(i) {
+        return i === index ? target : originalCommandName.call(this, i);
+      };
+      try {
+        return _commandDrawItem.apply(this, arguments);
+      } finally {
+        this.commandName = originalCommandName;
+      }
+    };
+  }
+
+  if (typeof Window_BattleLog !== "undefined" && Window_BattleLog.prototype && Window_BattleLog.prototype.addText) {
+    var _battleLogAddText = Window_BattleLog.prototype.addText;
+    Window_BattleLog.prototype.addText = function(text) {
+      var probe = record(text, "battleLog", this, this.contents ? this.contents.width : "", "");
+      return _battleLogAddText.call(this, probe.target != null ? probe.target : text);
+    };
+  }
+
+  if (typeof Window_Help !== "undefined" && Window_Help.prototype && Window_Help.prototype.setText) {
+    var _helpSetText = Window_Help.prototype.setText;
+    Window_Help.prototype.setText = function(text) {
+      var probe = record(text, "help", this, this.contents ? this.contents.width : "", "");
+      return _helpSetText.call(this, probe.target != null ? probe.target : text);
     };
   }
 
@@ -355,8 +789,21 @@ const PLUGIN = String.raw`/*:
     var _bitmapDrawText = Bitmap.prototype.drawText;
     Bitmap.prototype.drawText = function(text, x, y, maxWidth, lineHeight, align) {
       if (inDraw) return _bitmapDrawText.apply(this, arguments);
-      var probe = record(text, "bitmap", this, maxWidth, align || "");
-      return _bitmapDrawText.call(this, probe.target != null ? probe.target : text, x, y, maxWidth, lineHeight, align);
+      if (shouldAggregateBitmapText(text)) {
+        queueBitmapFragment(this, text, x, y, maxWidth, lineHeight, align);
+        return _bitmapDrawText.apply(this, arguments);
+      }
+      var owner = this._rpgmtransRuntimeOwner || this;
+      var probe = record(text, "bitmap", owner, maxWidth, align || "");
+      var value = probe.target != null ? probe.target : text;
+      if (!containsCjkText(value)) return _bitmapDrawText.call(this, value, x, y, maxWidth, lineHeight, align);
+      var oldFontFace = this.fontFace;
+      try {
+        this.fontFace = withCjkFontFallback(this.fontFace);
+        return _bitmapDrawText.call(this, value, x, y, maxWidth, lineHeight, align);
+      } finally {
+        this.fontFace = oldFontFace;
+      }
     };
   }
 

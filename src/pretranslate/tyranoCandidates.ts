@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { RuntimeProfile, SemanticHint } from "../core/types.js";
+import { isEmbeddedZipPath, parseEmbeddedZipPath, readEmbeddedZipText } from "../core/embeddedZip.js";
 import { normalizePath } from "../core/paths.js";
 import type { RuntimeTextCandidate } from "./types.js";
 
@@ -10,7 +11,7 @@ export function collectTyranoCandidates(profile: RuntimeProfile): RuntimeTextCan
   for (const file of files) {
     let text = "";
     try {
-      text = fs.readFileSync(file, "utf8");
+      text = isEmbeddedZipPath(file) ? readEmbeddedZipText(file) : fs.readFileSync(file, "utf8");
     } catch {
       continue;
     }
@@ -20,9 +21,12 @@ export function collectTyranoCandidates(profile: RuntimeProfile): RuntimeTextCan
 }
 
 function collectKs(profile: RuntimeProfile, file: string, text: string, out: RuntimeTextCandidate[]): void {
-  const rel = normalizePath(path.relative(profile.outputRoot, file).startsWith("..")
-    ? path.relative(profile.sourceRoot, file)
-    : path.relative(profile.outputRoot, file));
+  const embedded = parseEmbeddedZipPath(file);
+  const rel = embedded
+    ? `${path.basename(embedded.archive)}!/${embedded.entry}`
+    : normalizePath(path.relative(profile.outputRoot, file).startsWith("..")
+      ? path.relative(profile.sourceRoot, file)
+      : path.relative(profile.outputRoot, file));
   const lines = text.split(/\r?\n/);
   let inMacro = false;
   for (let index = 0; index < lines.length; index++) {
@@ -45,7 +49,7 @@ function collectKs(profile: RuntimeProfile, file: string, text: string, out: Run
     for (const match of line.matchAll(/@(?:glink|ptext|button|link|text)\b[^\r\n]*\btext=(["'])(.*?)\1/gi)) {
       add(out, profile, rel, index, decodeKsString(match[2]), "choice", "text");
     }
-    for (const match of line.matchAll(/\[chara_name\b[^\]]*\bname=(["'])(.*?)\1[^\]]*\]/gi)) {
+    for (const match of line.matchAll(/\[(?:chara_name|chara_ptext)\b[^\]]*\bname=(["'])(.*?)\1[^\]]*\]/gi)) {
       add(out, profile, rel, index, decodeKsString(match[2]), "name", "name");
     }
     for (const match of line.matchAll(/\[link\b[^\]]*\]([\s\S]*?)\[endlink\]/gi)) {
@@ -66,7 +70,7 @@ function add(
   semanticHint: SemanticHint,
   fieldName: string
 ): void {
-  const value = source.trim();
+  const value = stripTyranoDisplayTags(source);
   if (!isSafeText(value)) return;
   out.push({
     engine: profile.engine.name,
@@ -93,14 +97,30 @@ function stripInlineTags(input: string): string {
   return input.replace(/\[[^\]\r\n]{1,200}\]/g, "").trim();
 }
 
+function stripTyranoDisplayTags(input: string): string {
+  return input
+    .replace(/\[(?:p|r|l|cm|ct|clearfix|resetfont|resetconfig|endlink)\b[^\]\r\n]*\]/gi, "")
+    .replace(/^\s*@(?:p|r|l|cm|ct)\b[^\r\n]*$/gim, "")
+    .trim();
+}
+
 function isSafeText(value: string): boolean {
   const text = value.trim();
   if (!text || text.length < 2) return false;
   if (/^\[[^\]]+\]$/.test(text)) return false;
   if (/^[A-Za-z0-9_./\\:-]+\.(png|jpg|jpeg|webp|ogg|opus|mp3|wav|ks|js|json)$/i.test(text)) return false;
   if (/^[A-Za-z0-9_./\\:-]+$/.test(text) && /[./\\]/.test(text)) return false;
+  if (looksLikeCode(text)) return false;
   if (/^\$?\{.*\}$/.test(text)) return false;
   return /[A-Za-z\u3040-\u30ff\u3400-\u9fff]/.test(text);
+}
+
+function looksLikeCode(text: string): boolean {
+  if (/^(?:if|for|while|switch)\s*\(.+\)\s*\{?$/.test(text)) return true;
+  if (/^(?:var|let|const|return|else)\b/.test(text) && /[;{}()=]/.test(text)) return true;
+  if (/^(?:tf|sf|mp|f|TYRANO|tyrano|this|kag)\b(?:[.\[])/.test(text) && /[;{}()=]/.test(text)) return true;
+  if (/^[A-Za-z_$][\w$]*(?:[.\[][^\s]*)+\s*=\s*[^=].*;?$/.test(text)) return true;
+  return false;
 }
 
 function listFiles(root: string, pattern: RegExp): string[] {

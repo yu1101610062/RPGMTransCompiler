@@ -3,6 +3,7 @@ import path from "node:path";
 import { defaultWorkRoot, normalizePath } from "../core/paths.js";
 import { sha256File, shortHash } from "../core/hash.js";
 import type { EngineName, RuntimeProfile } from "../core/types.js";
+import { findEmbeddedTyranoPackage, makeEmbeddedZipPath } from "../core/embeddedZip.js";
 import { runtimeManifestPath, type RuntimeInstallManifest } from "../runtime/protocol.js";
 import { readRgssArchiveVersion } from "./rgss/archive.js";
 
@@ -224,7 +225,21 @@ function detectTyrano(root: string): Detection | undefined {
   const tyranoJs = path.join(root, "tyrano", "tyrano.js");
   const hasTyranoSignal = fs.existsSync(indexHtml)
     && (fs.existsSync(scenarioRoot) || fs.existsSync(kag) || fs.existsSync(tyranoJs));
-  if (!hasTyranoSignal) return undefined;
+  if (!hasTyranoSignal) {
+    const embedded = findEmbeddedTyranoPackage(root);
+    if (!embedded) return undefined;
+    return {
+      family: "TYRANO",
+      engine: "TYRANO",
+      confidence: 0.9,
+      detectedBy: embedded.detectedBy,
+      dataFormat: "tyrano",
+      dataRoot: makeEmbeddedZipPath(embedded.archive, "data"),
+      dataFiles: embedded.scenarioFiles,
+      encoding: "utf-8",
+      scriptRuntime: { language: "javascript", runtime: "tyrano" }
+    };
+  }
   const scenarioFiles = fs.existsSync(scenarioRoot) ? listFiles(scenarioRoot, /\.ks$/i) : [];
   const detectedBy = ["index.html"];
   if (fs.existsSync(scenarioRoot)) detectedBy.push("data/scenario/");

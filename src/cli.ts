@@ -2,6 +2,7 @@
 import {
   installRuntimeCommand,
   pretranslateCommand,
+  pretranslateEstimateCommand,
   reportCommand,
   restoreRuntimeCommand,
   runCommand,
@@ -61,6 +62,19 @@ async function main(): Promise<void> {
         concurrency: Number(stringOpt(args, "concurrency", "100")),
         overwrite: Boolean(args.overwrite),
         progress: Boolean(args.progress)
+      }), null, 2));
+      break;
+    }
+    case "pretranslate-estimate": {
+      const db = requiredPos(args, 0, "project db");
+      const mode = stringOpt(args, "mode", "safe");
+      if (mode !== "safe") throw new Error(`Unsupported pretranslate mode: ${mode}`);
+      console.log(JSON.stringify(pretranslateEstimateCommand(db, {
+        mode,
+        batchSize: Number(stringOpt(args, "batch-size", "20")),
+        overwrite: Boolean(args.overwrite),
+        inputTokenPricePerMillion: Number(stringOpt(args, "input-token-price", "0")),
+        outputTokenPricePerMillion: Number(stringOpt(args, "output-token-price", "0"))
       }), null, 2));
       break;
     }
@@ -144,6 +158,7 @@ function usage(): void {
   rpgmtrans restore-runtime DB
   rpgmtrans watch DB [--provider mock|deepseek|openai] [--once] [--poll-ms 500] [--batch-size 20] [--concurrency 100] [--no-skip-translated]
   rpgmtrans pretranslate DB [--provider mock|deepseek|openai] [--mode safe] [--batch-size 20] [--concurrency 100] [--progress] [--overwrite]
+  rpgmtrans pretranslate-estimate DB [--mode safe] [--batch-size 20] [--overwrite] [--input-token-price 0] [--output-token-price 0]
   rpgmtrans validate-runtime DB
   rpgmtrans report DB [--out REPORT_DIR]
   rpgmtrans run SOURCE [--provider mock|deepseek|openai] [--target zh-Hans] [--db DB] [--no-launch]

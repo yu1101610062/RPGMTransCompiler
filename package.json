@@ -10,7 +10,7 @@
     "build": "tsc -p tsconfig.json",
     "desktop:build": "dotnet build desktop/RPGMTransLauncher/RPGMTransLauncher.csproj -c Release",
     "desktop:run": "dotnet run --project desktop/RPGMTransLauncher/RPGMTransLauncher.csproj",
-    "desktop:publish": "dotnet publish desktop/RPGMTransLauncher/RPGMTransLauncher.csproj -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true",
+    "desktop:publish": "node scripts/publish.mjs",
     "dev": "tsx src/cli.ts",
     "test": "vitest run"
   },

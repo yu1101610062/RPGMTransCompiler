@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -7,6 +8,10 @@ namespace RPGMTransLauncher;
 
 public sealed class Form1 : Form
 {
+    private const int SettingsRowHeight = 36;
+    private const int SettingsPanelHeight = 308;
+    private const int DropPanelHeight = 126;
+
     private readonly TextBox _exePath = new();
     private readonly TextBox _sourceRoot = new();
     private readonly TextBox _outputRoot = new();
@@ -16,6 +21,8 @@ public sealed class Form1 : Form
     private readonly TextBox _baseUrl = new();
     private readonly TextBox _model = new();
     private readonly TextBox _apiKey = new();
+    private readonly TextBox _inputTokenPrice = new();
+    private readonly TextBox _outputTokenPrice = new();
     private readonly CheckBox _showKey = new();
     private readonly CheckBox _autoRunOnDrop = new();
     private readonly CheckBox _skipTranslated = new();
@@ -65,8 +72,8 @@ public sealed class Form1 : Form
             RowCount = 5,
             Padding = new Padding(14),
         };
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 96));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 228));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, DropPanelHeight));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, SettingsPanelHeight));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 126));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
@@ -81,8 +88,8 @@ public sealed class Form1 : Form
         {
             Dock = DockStyle.Fill,
             TextAlign = ContentAlignment.MiddleCenter,
-            Text = "拖入游戏启动程序 exe\n或点击选择要注入运行时翻译插件的游戏 exe",
-            Font = new Font(Font.FontFamily, 13F, FontStyle.Bold),
+            Text = "拖入游戏启动程序 exe，或点击选择要注入的游戏\n支持：RPG Maker MV/MZ/XP/VX/VX Ace、Ren'Py、TyranoScript/TyranoBuilder\n不支持：浏览器/移动导出版、RPG Maker 2000/2003",
+            Font = new Font(Font.FontFamily, 11F, FontStyle.Bold),
             ForeColor = Color.FromArgb(38, 58, 86)
         };
         _dropPanel.Controls.Add(dropText);
@@ -92,14 +99,14 @@ public sealed class Form1 : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 4,
-            RowCount = 7,
+            RowCount = 8,
             Padding = new Padding(0, 12, 0, 0),
         };
         settings.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 96));
         settings.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         settings.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 116));
         settings.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 112));
-        for (var i = 0; i < 7; i++) settings.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
+        for (var i = 0; i < 8; i++) settings.RowStyles.Add(new RowStyle(SizeType.Absolute, SettingsRowHeight));
         root.Controls.Add(settings, 0, 1);
 
         AddPathRow(settings, 0, "游戏 exe", _exePath, "选择 exe", ChooseExe);
@@ -109,31 +116,49 @@ public sealed class Form1 : Form
 
         AddLabel(settings, "目标语言", 0, 4);
         _targetLang.Dock = DockStyle.Fill;
+        ConfigureSettingsControl(_targetLang);
         settings.Controls.Add(_targetLang, 1, 4);
         AddLabel(settings, "Provider", 2, 4);
         _provider.Dock = DockStyle.Fill;
         _provider.DropDownStyle = ComboBoxStyle.DropDownList;
         _provider.Items.AddRange(["mock", "deepseek", "openai"]);
+        ConfigureSettingsControl(_provider);
         settings.Controls.Add(_provider, 3, 4);
 
         AddLabel(settings, "API Base", 0, 5);
         _baseUrl.Dock = DockStyle.Fill;
+        ConfigureSettingsControl(_baseUrl);
         settings.Controls.Add(_baseUrl, 1, 5);
         AddLabel(settings, "模型", 2, 5);
         _model.Dock = DockStyle.Fill;
+        ConfigureSettingsControl(_model);
         settings.Controls.Add(_model, 3, 5);
 
         AddLabel(settings, "API Key", 0, 6);
         _apiKey.Dock = DockStyle.Fill;
         _apiKey.UseSystemPasswordChar = true;
         _apiKey.PlaceholderText = "留空时读取 DEEPSEEK_API_KEY / .env.local";
+        ConfigureSettingsControl(_apiKey);
         settings.Controls.Add(_apiKey, 1, 6);
         _showKey.Text = "显示密钥";
         _showKey.Dock = DockStyle.Fill;
+        ConfigureSettingsControl(_showKey);
         settings.Controls.Add(_showKey, 2, 6);
         var openOut = new Button { Text = "打开目录", Dock = DockStyle.Fill };
+        ConfigureSettingsControl(openOut);
         openOut.Click += (_, _) => OpenFolder(_outputRoot.Text);
         settings.Controls.Add(openOut, 3, 6);
+
+        AddLabel(settings, "输入价/百万token", 0, 7);
+        _inputTokenPrice.Dock = DockStyle.Fill;
+        _inputTokenPrice.PlaceholderText = "0";
+        ConfigureSettingsControl(_inputTokenPrice);
+        settings.Controls.Add(_inputTokenPrice, 1, 7);
+        AddLabel(settings, "输出价/百万token", 2, 7);
+        _outputTokenPrice.Dock = DockStyle.Fill;
+        _outputTokenPrice.PlaceholderText = "0";
+        ConfigureSettingsControl(_outputTokenPrice);
+        settings.Controls.Add(_outputTokenPrice, 3, 7);
 
         var actions = new FlowLayoutPanel
         {
@@ -206,6 +231,8 @@ public sealed class Form1 : Form
         _baseUrl.TextChanged += (_, _) => SaveLauncherConfig();
         _model.TextChanged += (_, _) => SaveLauncherConfig();
         _apiKey.TextChanged += (_, _) => SaveLauncherConfig();
+        _inputTokenPrice.TextChanged += (_, _) => SaveLauncherConfig();
+        _outputTokenPrice.TextChanged += (_, _) => SaveLauncherConfig();
         _showKey.CheckedChanged += (_, _) => _apiKey.UseSystemPasswordChar = !_showKey.Checked;
         _skipTranslated.CheckedChanged += async (_, _) =>
         {
@@ -243,11 +270,28 @@ public sealed class Form1 : Form
     {
         AddLabel(layout, label, 0, row);
         box.Dock = DockStyle.Fill;
+        ConfigureSettingsControl(box);
         layout.Controls.Add(box, 1, row);
         layout.SetColumnSpan(box, 2);
         var button = new Button { Text = buttonText, Dock = DockStyle.Fill };
+        ConfigureSettingsControl(button);
         button.Click += (_, _) => action();
         layout.Controls.Add(button, 3, row);
+    }
+
+    private static void ConfigureSettingsControl(Control control)
+    {
+        control.Margin = new Padding(2);
+        control.MinimumSize = new Size(0, 30);
+        if (control is Button button)
+        {
+            button.Padding = new Padding(0);
+            button.TextAlign = ContentAlignment.MiddleCenter;
+        }
+        if (control is ComboBox combo)
+        {
+            combo.IntegralHeight = false;
+        }
     }
 
     private static void AddLabel(TableLayoutPanel layout, string text, int column, int row)
@@ -414,7 +458,7 @@ public sealed class Form1 : Form
         if (!File.Exists(file)) return null;
         try
         {
-            using var doc = JsonDocument.Parse(File.ReadAllText(file, Encoding.UTF8));
+            using var doc = JsonDocument.Parse(ReadAllTextShared(file));
             var root = doc.RootElement;
             return new RuntimeManifestInfo
             {
@@ -439,6 +483,10 @@ public sealed class Form1 : Form
                 _model.Text = _config.DeepSeekModel ?? FirstEnvironment("DEEPSEEK_MODEL", "OPENAI_MODEL") ?? "deepseek-v4-flash";
             if (loadSaved)
                 _apiKey.Text = UnprotectSecret(_config.DeepSeekApiKeyProtected) ?? FirstEnvironment("DEEPSEEK_API_KEY", "OPENAI_API_KEY") ?? "";
+            if (loadSaved || string.IsNullOrWhiteSpace(_inputTokenPrice.Text))
+                _inputTokenPrice.Text = FormatPrice(_config.DeepSeekInputTokenPricePerMillion, FirstEnvironment("DEEPSEEK_INPUT_TOKEN_PRICE", "OPENAI_INPUT_TOKEN_PRICE"));
+            if (loadSaved || string.IsNullOrWhiteSpace(_outputTokenPrice.Text))
+                _outputTokenPrice.Text = FormatPrice(_config.DeepSeekOutputTokenPricePerMillion, FirstEnvironment("DEEPSEEK_OUTPUT_TOKEN_PRICE", "OPENAI_OUTPUT_TOKEN_PRICE"));
         }
         else if (selected == "openai")
         {
@@ -448,10 +496,16 @@ public sealed class Form1 : Form
                 _model.Text = _config.OpenAiModel ?? FirstEnvironment("OPENAI_MODEL") ?? "";
             if (loadSaved)
                 _apiKey.Text = UnprotectSecret(_config.OpenAiApiKeyProtected) ?? FirstEnvironment("OPENAI_API_KEY") ?? "";
+            if (loadSaved || string.IsNullOrWhiteSpace(_inputTokenPrice.Text))
+                _inputTokenPrice.Text = FormatPrice(_config.OpenAiInputTokenPricePerMillion, FirstEnvironment("OPENAI_INPUT_TOKEN_PRICE"));
+            if (loadSaved || string.IsNullOrWhiteSpace(_outputTokenPrice.Text))
+                _outputTokenPrice.Text = FormatPrice(_config.OpenAiOutputTokenPricePerMillion, FirstEnvironment("OPENAI_OUTPUT_TOKEN_PRICE"));
         }
         else if (selected == "mock" && loadSaved)
         {
             _apiKey.Text = "";
+            _inputTokenPrice.Text = "0";
+            _outputTokenPrice.Text = "0";
         }
     }
 
@@ -497,6 +551,23 @@ public sealed class Form1 : Form
         await RunInstallAsync();
         var provider = _provider.SelectedItem?.ToString() ?? "mock";
         var overwrite = _skipTranslated.Checked ? "" : " --overwrite";
+        var inputPrice = PriceArg(_inputTokenPrice);
+        var outputPrice = PriceArg(_outputTokenPrice);
+        var estimateJson = await RunCliCaptureAsync("pretranslate-estimate", $"{Quote(_dbPath.Text)} --mode safe --batch-size 20 --input-token-price {inputPrice} --output-token-price {outputPrice}{overwrite}");
+        var estimate = JsonSerializer.Deserialize<PretranslateEstimate>(estimateJson, new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+            ?? throw new InvalidOperationException("无法解析预翻译 token 估算结果。");
+        var confirm = MessageBox.Show(
+            this,
+            BuildPretranslateEstimateMessage(estimate),
+            "确认预翻译消耗",
+            MessageBoxButtons.OKCancel,
+            MessageBoxIcon.Information);
+        if (confirm != DialogResult.OK)
+        {
+            _status.Text = "已取消预翻译";
+            AppendLog("已取消预翻译。");
+            return;
+        }
         await RunCliAsync("pretranslate", $"{Quote(_dbPath.Text)} --provider {provider} --mode safe --batch-size 20 --concurrency 100 --progress{overwrite}");
         _status.Text = "预翻译缓存完成";
         UpdateStats();
@@ -519,7 +590,7 @@ public sealed class Form1 : Form
         }
         await EnsureCliBuiltAsync();
         var skipArg = _skipTranslated.Checked ? "" : " --no-skip-translated";
-        _watcher = StartProcess("node", $"dist/cli.js watch {Quote(_dbPath.Text)} --provider {provider} --batch-size 20 --concurrency 100{skipArg}", keepAlive: true);
+        _watcher = StartProcess(ResolveNodeExecutable(), $"dist/cli.js watch {Quote(_dbPath.Text)} --provider {provider} --batch-size 20 --concurrency 100{skipArg}", keepAlive: true);
         _watcherConfigSignature = configSignature;
         _status.Text = $"监听中: {provider}";
         AppendLog("监听已启动。首次缺译显示原文，翻译完成后写入缓存，游戏会自动重载。");
@@ -588,7 +659,13 @@ public sealed class Form1 : Form
     private async Task RunCliAsync(string command, string args)
     {
         await EnsureProjectReadyAsync();
-        await RunProcessAsync("node", $"dist/cli.js {command} {args}");
+        await RunProcessAsync(ResolveNodeExecutable(), $"dist/cli.js {command} {args}");
+    }
+
+    private async Task<string> RunCliCaptureAsync(string command, string args)
+    {
+        await EnsureProjectReadyAsync();
+        return await RunProcessCaptureAsync(ResolveNodeExecutable(), $"dist/cli.js {command} {args}");
     }
 
     private async Task EnsureProjectReadyAsync()
@@ -597,11 +674,50 @@ public sealed class Form1 : Form
         await Task.CompletedTask;
     }
 
+    private string ResolveNodeExecutable()
+    {
+        var root = RequireProjectRoot(true)!;
+        var bundled = Path.Combine(root, "node", "node.exe");
+        return File.Exists(bundled) ? bundled : "node";
+    }
+
     private async Task RunProcessAsync(string fileName, string arguments)
     {
         using var process = StartProcess(fileName, arguments, keepAlive: false);
         await process.WaitForExitAsync();
         if (process.ExitCode != 0) throw new InvalidOperationException($"{fileName} {arguments} 退出码 {process.ExitCode}");
+    }
+
+    private async Task<string> RunProcessCaptureAsync(string fileName, string arguments)
+    {
+        var root = RequireProjectRoot(true)!;
+        AppendLog($"> {fileName} {Redact(arguments)}");
+        using var process = new Process
+        {
+            StartInfo = new ProcessStartInfo
+            {
+                FileName = fileName,
+                Arguments = arguments,
+                WorkingDirectory = root,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8,
+                CreateNoWindow = true
+            }
+        };
+        ApplyProviderEnvironment(process.StartInfo);
+        if (!process.Start()) throw new InvalidOperationException($"无法启动进程: {fileName}");
+        var stdoutTask = process.StandardOutput.ReadToEndAsync();
+        var stderrTask = process.StandardError.ReadToEndAsync();
+        await process.WaitForExitAsync();
+        var stdout = await stdoutTask;
+        var stderr = await stderrTask;
+        if (!string.IsNullOrWhiteSpace(stderr)) AppendLog(Redact(stderr.Trim()));
+        if (!string.IsNullOrWhiteSpace(stdout)) AppendLog(Redact(stdout.Trim()));
+        if (process.ExitCode != 0) throw new InvalidOperationException($"{fileName} {arguments} exit code {process.ExitCode}");
+        return stdout;
     }
 
     private Process StartProcess(string fileName, string arguments, bool keepAlive)
@@ -756,10 +872,10 @@ public sealed class Form1 : Form
             var cache = Path.Combine(runtime, "cache", "translations.rtc");
             var pretranslate = Path.Combine(runtime, "cache", "pretranslate.json");
             var requestLines = Directory.Exists(requests)
-                ? Directory.GetFiles(requests, "*.rtlog").Sum(file => File.ReadLines(file, Encoding.UTF8).Count(line => line.StartsWith("1\t")))
+                ? Directory.GetFiles(requests, "*.rtlog").Sum(file => CountLinesStartingWith(file, "1\t"))
                 : 0;
             var cacheLines = File.Exists(cache)
-                ? File.ReadLines(cache, Encoding.UTF8).Count(line => line.StartsWith("1\t"))
+                ? CountLinesStartingWith(cache, "1\t")
                 : 0;
             var pretranslateStats = ReadPretranslateStats(pretranslate);
             var pretranslateText = pretranslateStats.BatchesTotal > 0 && pretranslateStats.Phase != "done"
@@ -779,7 +895,7 @@ public sealed class Form1 : Form
         if (!File.Exists(file)) return new PretranslateStats();
         try
         {
-            using var doc = JsonDocument.Parse(File.ReadAllText(file, Encoding.UTF8));
+            using var doc = JsonDocument.Parse(ReadAllTextShared(file));
             return new PretranslateStats
             {
                 Phase = ReadString(doc.RootElement, "phase"),
@@ -792,6 +908,32 @@ public sealed class Form1 : Form
         catch
         {
             return new PretranslateStats();
+        }
+    }
+
+    private static string ReadAllTextShared(string file)
+    {
+        using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+        return reader.ReadToEnd();
+    }
+
+    private static int CountLinesStartingWith(string file, string prefix)
+    {
+        try
+        {
+            using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+            var count = 0;
+            while (reader.ReadLine() is { } line)
+            {
+                if (line.StartsWith(prefix, StringComparison.Ordinal)) count++;
+            }
+            return count;
+        }
+        catch
+        {
+            return 0;
         }
     }
 
@@ -859,6 +1001,55 @@ public sealed class Form1 : Form
         return null;
     }
 
+    private static string FormatPrice(decimal? saved, string? environmentValue)
+    {
+        if (saved.HasValue) return saved.Value.ToString("0.########", CultureInfo.InvariantCulture);
+        if (decimal.TryParse(environmentValue, NumberStyles.Float, CultureInfo.InvariantCulture, out var envPrice) && envPrice >= 0)
+            return envPrice.ToString("0.########", CultureInfo.InvariantCulture);
+        return "0";
+    }
+
+    private static decimal? ParseNullableDecimal(string value)
+    {
+        return decimal.TryParse(value.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed) && parsed >= 0
+            ? parsed
+            : null;
+    }
+
+    private static string PriceArg(TextBox box)
+    {
+        return decimal.TryParse(box.Text.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed) && parsed >= 0
+            ? parsed.ToString(CultureInfo.InvariantCulture)
+            : "0";
+    }
+
+    private static string BuildPretranslateEstimateMessage(PretranslateEstimate estimate)
+    {
+        return string.Join(Environment.NewLine, [
+            "预翻译即将调用模型。请确认估算消耗：",
+            "",
+            $"扫描候选: {estimate.Scanned:N0}",
+            $"可翻译候选: {estimate.Candidates:N0}",
+            $"待模型翻译: {estimate.Queued:N0}",
+            $"跳过缓存: {estimate.SkippedCached:N0}",
+            $"跳过/仅记录: {estimate.SkippedUnsafe:N0}",
+            $"内置写入: {estimate.BuiltIn:N0}",
+            $"批次数: {estimate.BatchesTotal:N0}",
+            "",
+            $"预计输入 token: {estimate.EstimatedInputTokens:N0}",
+            $"预计输出 token: {estimate.EstimatedOutputTokens:N0}",
+            $"预计总 token: {estimate.EstimatedTotalTokens:N0}",
+            "",
+            $"输入价格/百万 token: {estimate.InputTokenPricePerMillion.ToString("0.########", CultureInfo.InvariantCulture)}",
+            $"输出价格/百万 token: {estimate.OutputTokenPricePerMillion.ToString("0.########", CultureInfo.InvariantCulture)}",
+            $"预计输入费用: {estimate.EstimatedInputCost.ToString("0.######", CultureInfo.InvariantCulture)}",
+            $"预计输出费用: {estimate.EstimatedOutputCost.ToString("0.######", CultureInfo.InvariantCulture)}",
+            $"预计总费用: {estimate.EstimatedTotalCost.ToString("0.######", CultureInfo.InvariantCulture)}",
+            "",
+            "是否继续正式预翻译？"
+        ]);
+    }
+
     private string WatcherConfigSignature(string provider)
     {
         return ShortHash(string.Join("\n", [
@@ -884,7 +1075,7 @@ public sealed class Form1 : Form
         if (!File.Exists(file)) return new LauncherConfig();
         try
         {
-            return JsonSerializer.Deserialize<LauncherConfig>(File.ReadAllText(file, Encoding.UTF8)) ?? new LauncherConfig();
+            return JsonSerializer.Deserialize<LauncherConfig>(ReadAllTextShared(file)) ?? new LauncherConfig();
         }
         catch
         {
@@ -905,12 +1096,16 @@ public sealed class Form1 : Form
                 _config.DeepSeekBaseUrl = EmptyToNull(_baseUrl.Text);
                 _config.DeepSeekModel = EmptyToNull(_model.Text);
                 _config.DeepSeekApiKeyProtected = ProtectSecret(_apiKey.Text);
+                _config.DeepSeekInputTokenPricePerMillion = ParseNullableDecimal(_inputTokenPrice.Text);
+                _config.DeepSeekOutputTokenPricePerMillion = ParseNullableDecimal(_outputTokenPrice.Text);
             }
             else if (provider == "openai")
             {
                 _config.OpenAiBaseUrl = EmptyToNull(_baseUrl.Text);
                 _config.OpenAiModel = EmptyToNull(_model.Text);
                 _config.OpenAiApiKeyProtected = ProtectSecret(_apiKey.Text);
+                _config.OpenAiInputTokenPricePerMillion = ParseNullableDecimal(_inputTokenPrice.Text);
+                _config.OpenAiOutputTokenPricePerMillion = ParseNullableDecimal(_outputTokenPrice.Text);
             }
 
             var file = ConfigFilePath();
@@ -962,10 +1157,33 @@ public sealed class Form1 : Form
         public string? DeepSeekBaseUrl { get; set; }
         public string? DeepSeekModel { get; set; }
         public string? DeepSeekApiKeyProtected { get; set; }
+        public decimal? DeepSeekInputTokenPricePerMillion { get; set; }
+        public decimal? DeepSeekOutputTokenPricePerMillion { get; set; }
         public string? OpenAiBaseUrl { get; set; }
         public string? OpenAiModel { get; set; }
         public string? OpenAiApiKeyProtected { get; set; }
+        public decimal? OpenAiInputTokenPricePerMillion { get; set; }
+        public decimal? OpenAiOutputTokenPricePerMillion { get; set; }
         public bool? SkipTranslated { get; set; }
+    }
+
+    private sealed class PretranslateEstimate
+    {
+        public int Scanned { get; set; }
+        public int Candidates { get; set; }
+        public int Queued { get; set; }
+        public int SkippedCached { get; set; }
+        public int SkippedUnsafe { get; set; }
+        public int BuiltIn { get; set; }
+        public int BatchesTotal { get; set; }
+        public long EstimatedInputTokens { get; set; }
+        public long EstimatedOutputTokens { get; set; }
+        public long EstimatedTotalTokens { get; set; }
+        public decimal InputTokenPricePerMillion { get; set; }
+        public decimal OutputTokenPricePerMillion { get; set; }
+        public decimal EstimatedInputCost { get; set; }
+        public decimal EstimatedOutputCost { get; set; }
+        public decimal EstimatedTotalCost { get; set; }
     }
 
     private sealed class PretranslateStats

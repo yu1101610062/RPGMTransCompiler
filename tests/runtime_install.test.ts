@@ -1,9 +1,11 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import zlib from "node:zlib";
 import { describe, expect, it } from "vitest";
+import { makeEmbeddedZipPath, readEmbeddedZipText } from "../src/core/embeddedZip.js";
 import { scanProject } from "../src/engines/scanner.js";
-import { installRuntime, restoreRuntime } from "../src/runtime/install.js";
+import { installRuntime, restoreRuntime, validateRuntimeInstall } from "../src/runtime/install.js";
 import { readRuntimeCache, runtimeCachePath, runtimeManifestPath, runtimeTextKey } from "../src/runtime/protocol.js";
 
 describe("runtime install in place", () => {
@@ -31,7 +33,23 @@ describe("runtime install in place", () => {
 
     const result = installRuntime(profile);
     expect(result.issues.filter(issue => issue.severity === "fatal")).toHaveLength(0);
-    expect(fs.existsSync(path.join(game, "js", "plugins", "RPGMTransRuntime.js"))).toBe(true);
+    const pluginFile = path.join(game, "js", "plugins", "RPGMTransRuntime.js");
+    expect(fs.existsSync(pluginFile)).toBe(true);
+    const pluginText = fs.readFileSync(pluginFile, "utf8");
+    expect(pluginText).toContain("Window_Message.prototype.updateMessage");
+    expect(pluginText).toContain("Window_Command.prototype.drawItem");
+    expect(pluginText).toContain("Window_BattleLog.prototype.addText");
+    expect(pluginText).toContain("bitmapBatch");
+    expect(pluginText).toContain("withCjkFontFallback");
+    expect(pluginText).toContain("Microsoft YaHei");
+    expect(pluginText).toContain("hasPendingMessageInput");
+    expect(pluginText).toContain("_rpgmtransRuntimeMessageSkipRepaint");
+    expect(pluginText).toContain("repaintMessageWindowBody");
+    expect(pluginText).toContain("Game_Interpreter.prototype.command101");
+    expect(pluginText).toContain("message_event");
+    expect(pluginText).toContain("_rpgmtransRuntimeTranslatedText");
+    expect(pluginText).not.toContain("skipRepaint || probe.target");
+    expect(pluginText).not.toContain("$gameMessage._texts =");
     expect(fs.readFileSync(path.join(game, "js", "plugins.js"), "utf8")).toContain("RPGMTransRuntime");
     expect(fs.existsSync(path.join(game, "RPGMTransRuntime", "backups", "backup-manifest.json"))).toBe(true);
     expect(readRuntimeCache(runtimeCachePath(game)).get(key)?.target).toBe("新游戏");
@@ -39,7 +57,7 @@ describe("runtime install in place", () => {
     const restored = restoreRuntime(profile);
     expect(restored.issues.filter(issue => issue.severity === "fatal" || issue.severity === "error")).toHaveLength(0);
     expect(fs.readFileSync(path.join(game, "js", "plugins.js"), "utf8")).toBe("var $plugins = [];\n");
-    expect(fs.existsSync(path.join(game, "js", "plugins", "RPGMTransRuntime.js"))).toBe(false);
+    expect(fs.existsSync(pluginFile)).toBe(false);
     expect(fs.existsSync(runtimeManifestPath(game))).toBe(false);
     expect(readRuntimeCache(runtimeCachePath(game)).get(key)?.target).toBe("新游戏");
   });
@@ -76,6 +94,14 @@ describe("runtime install in place", () => {
     const result = installRuntime(profile);
     expect(result.issues.filter(issue => issue.severity === "fatal")).toHaveLength(0);
     expect(fs.existsSync(path.join(root, "data", "others", "rpgmtrans_runtime.js"))).toBe(true);
+    const runtimeText = fs.readFileSync(path.join(root, "data", "others", "rpgmtrans_runtime.js"), "utf8");
+    expect(runtimeText).toContain("pm.val");
+    expect(runtimeText).toContain("chara_ptext");
+    expect(runtimeText).toContain("tyrano.plugin.kag.tag");
+    expect(runtimeText).toContain("stripTyranoDisplayTags");
+    expect(runtimeText).toContain("looksLikeCode");
+    expect(runtimeText).toContain("repaintPendingDialogue");
+    expect(runtimeText).toContain("recordMiss: false");
     expect(fs.readFileSync(first, "utf8")).toContain('[loadjs storage="rpgmtrans_runtime.js"]');
 
     const restored = restoreRuntime(profile);
@@ -83,4 +109,89 @@ describe("runtime install in place", () => {
     expect(fs.existsSync(path.join(root, "data", "others", "rpgmtrans_runtime.js"))).toBe(false);
     expect(fs.readFileSync(first, "utf8")).toBe("Hello\n");
   });
+
+  it("injects and restores a Tyrano runtime inside an NW.js executable package", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "rpgmtrans-tyrano-exe-install-"));
+    const exe = path.join(root, "Game.exe");
+    writeFakePackagedExe(exe, [
+      { name: "data/scenario/first.ks", text: "Hello packaged game\n" },
+      { name: "tyrano/plugins/kag/kag.js", text: "window.TYRANO={};" }
+    ]);
+
+    const { profile } = scanProject(root, { db: path.join(root, "project.sqlite") });
+    const result = installRuntime(profile);
+
+    expect(result.issues.filter(issue => issue.severity === "fatal")).toHaveLength(0);
+    expect(readEmbeddedZipText(makeEmbeddedZipPath(exe, "data/scenario/first.ks"))).toContain('[loadjs storage="rpgmtrans_runtime.js"]');
+    expect(readEmbeddedZipText(makeEmbeddedZipPath(exe, "data/others/rpgmtrans_runtime.js"))).toContain("RPGMTransRuntime bridge for TyranoScript");
+    expect(validateRuntimeInstall(profile).filter(issue => issue.severity === "fatal")).toHaveLength(0);
+
+    const restored = restoreRuntime(profile);
+    expect(restored.issues.filter(issue => issue.severity === "fatal" || issue.severity === "error")).toHaveLength(0);
+    expect(readEmbeddedZipText(makeEmbeddedZipPath(exe, "data/scenario/first.ks"))).toBe("Hello packaged game\n");
+    expect(() => readEmbeddedZipText(makeEmbeddedZipPath(exe, "data/others/rpgmtrans_runtime.js"))).toThrow();
+  });
 });
+
+function writeFakePackagedExe(file: string, entries: Array<{ name: string; text: string }>): void {
+  fs.writeFileSync(file, Buffer.concat([Buffer.from("MZfake\n"), makeZip(entries)]));
+}
+
+function makeZip(entries: Array<{ name: string; text: string }>): Buffer {
+  const localParts: Buffer[] = [];
+  const centralParts: Buffer[] = [];
+  let offset = 0;
+  for (const entry of entries) {
+    const name = Buffer.from(entry.name, "utf8");
+    const source = Buffer.from(entry.text, "utf8");
+    const compressed = zlib.deflateRawSync(source);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0);
+    local.writeUInt16LE(20, 4);
+    local.writeUInt16LE(8, 8);
+    local.writeUInt32LE(crc32(source), 14);
+    local.writeUInt32LE(compressed.length, 18);
+    local.writeUInt32LE(source.length, 22);
+    local.writeUInt16LE(name.length, 26);
+    localParts.push(local, name, compressed);
+
+    const central = Buffer.alloc(46);
+    central.writeUInt32LE(0x02014b50, 0);
+    central.writeUInt16LE(20, 4);
+    central.writeUInt16LE(20, 6);
+    central.writeUInt16LE(8, 10);
+    central.writeUInt32LE(crc32(source), 16);
+    central.writeUInt32LE(compressed.length, 20);
+    central.writeUInt32LE(source.length, 24);
+    central.writeUInt16LE(name.length, 28);
+    central.writeUInt32LE(offset, 42);
+    centralParts.push(central, name);
+    offset += local.length + name.length + compressed.length;
+  }
+
+  const centralDirectoryOffset = offset;
+  const centralDirectorySize = centralParts.reduce((sum, part) => sum + part.length, 0);
+  const eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0);
+  eocd.writeUInt16LE(entries.length, 8);
+  eocd.writeUInt16LE(entries.length, 10);
+  eocd.writeUInt32LE(centralDirectorySize, 12);
+  eocd.writeUInt32LE(centralDirectoryOffset, 16);
+  return Buffer.concat([...localParts, ...centralParts, eocd]);
+}
+
+function crc32(input: Buffer): number {
+  let crc = 0xffffffff;
+  for (const byte of input) crc = (crc >>> 8) ^ CRC32_TABLE[(crc ^ byte) & 0xff];
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+const CRC32_TABLE = (() => {
+  const table: number[] = [];
+  for (let i = 0; i < 256; i++) {
+    let value = i;
+    for (let bit = 0; bit < 8; bit++) value = (value & 1) ? (0xedb88320 ^ (value >>> 1)) : (value >>> 1);
+    table.push(value >>> 0);
+  }
+  return table;
+})();

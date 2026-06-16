@@ -22,6 +22,7 @@ export function collectMvMzCandidates(profile: RuntimeProfile): RuntimeTextCandi
       : path.relative(profile.outputRoot, file));
     collectFile(profile, rel, base, data, out);
   }
+  collectPluginManagerParameters(profile, out);
   return out;
 }
 
@@ -131,6 +132,9 @@ function collectCommands(profile: RuntimeProfile, file: string, basePath: string
   const flushMessages = () => {
     if (messageLines.length > 1) {
       add(out, profile, file, `${basePath}[${messageLines[0].index}..${messageLines.at(-1)!.index}]`, messageLines.map(line => line.text).join("\n"), "dialogue", "message", 401);
+    } else if (messageLines.length === 1) {
+      const line = messageLines[0];
+      add(out, profile, file, `${basePath}[${line.index}].parameters[0]`, line.text, "dialogue", "message", 401);
     }
     messageLines = [];
   };
@@ -150,12 +154,20 @@ function collectCommands(profile: RuntimeProfile, file: string, basePath: string
 
     if (code === 401 && typeof params[0] === "string") {
       messageLines.push({ text: params[0], index });
-      add(out, profile, file, `${basePath}[${index}].parameters[0]`, params[0], "dialogue", "message", code);
     } else if (code === 102 && Array.isArray(params[0])) {
       params[0].forEach((choice, choiceIndex) => add(out, profile, file, `${basePath}[${index}].parameters[0][${choiceIndex}]`, choice, "choice", "choice", code));
+    } else if (code === 402 && typeof params[1] === "string") {
+      add(out, profile, file, `${basePath}[${index}].parameters[1]`, params[1], "choice", "choice_branch", code);
     } else if (code === 405 && typeof params[0] === "string") {
       scrollLines.push({ text: params[0], index });
-      add(out, profile, file, `${basePath}[${index}].parameters[0]`, params[0], "dialogue", "scroll", code);
+    } else if ((code === 108 || code === 408) && typeof params[0] === "string") {
+      add(out, profile, file, `${basePath}[${index}].parameters[0]`, params[0], "comment", "comment", code, "review");
+    } else if ((code === 355 || code === 655) && typeof params[0] === "string") {
+      add(out, profile, file, `${basePath}[${index}].parameters[0]`, params[0], "script", "script", code, "review");
+    } else if (code === 356 && typeof params[0] === "string") {
+      add(out, profile, file, `${basePath}[${index}].parameters[0]`, params[0], "script", "plugin_command_mv", code, "review");
+    } else if (code === 357) {
+      collectPluginCommandParameters(profile, file, `${basePath}[${index}]`, params, out);
     }
   });
   flushMessages();
@@ -170,7 +182,8 @@ function add(
   value: JsonValue | undefined,
   semanticHint: SemanticHint,
   fieldName: string,
-  commandCode?: number
+  commandCode?: number,
+  action: RuntimeTextCandidate["action"] = "translate"
 ): void {
   if (typeof value !== "string") return;
   if (!isSafeText(value)) return;
@@ -182,8 +195,100 @@ function add(
     path: candidatePath,
     fieldName,
     commandCode,
-    context: { origin: "pretranslate", file, path: candidatePath, fieldName, commandCode }
+    action,
+    context: { origin: "pretranslate", file, path: candidatePath, fieldName, commandCode, action }
   });
+}
+
+function collectPluginCommandParameters(profile: RuntimeProfile, file: string, basePath: string, params: JsonValue[], out: RuntimeTextCandidate[]): void {
+  params.forEach((param, index) => {
+    collectNestedStrings(profile, file, `${basePath}.parameters[${index}]`, param, "plugin_command_mz", out);
+  });
+}
+
+function collectPluginManagerParameters(profile: RuntimeProfile, out: RuntimeTextCandidate[]): void {
+  const managerFile = profile.plugins?.managerFile || findPluginsJs(profile);
+  if (!managerFile || !fs.existsSync(managerFile)) return;
+  let entries: unknown;
+  try {
+    entries = parsePluginsJs(fs.readFileSync(managerFile, "utf8"));
+  } catch {
+    return;
+  }
+  if (!Array.isArray(entries)) return;
+  const file = normalizePath(path.relative(profile.outputRoot, managerFile).startsWith("..")
+    ? path.relative(profile.sourceRoot, managerFile)
+    : path.relative(profile.outputRoot, managerFile));
+  entries.forEach((entry, pluginIndex) => {
+    if (!isObject(entry as JsonValue)) return;
+    const parameters = (entry as { [key: string]: JsonValue }).parameters;
+    collectNestedStrings(profile, file, `$plugins[${pluginIndex}].parameters`, parameters, "plugin_parameter", out);
+  });
+}
+
+function collectNestedStrings(
+  profile: RuntimeProfile,
+  file: string,
+  basePath: string,
+  value: JsonValue | undefined,
+  fieldName: string,
+  out: RuntimeTextCandidate[]
+): void {
+  if (typeof value === "string") {
+    add(out, profile, file, basePath, value, "script", fieldName, undefined, "review");
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => collectNestedStrings(profile, file, `${basePath}[${index}]`, item, fieldName, out));
+    return;
+  }
+  if (isObject(value)) {
+    for (const [key, item] of Object.entries(value)) collectNestedStrings(profile, file, `${basePath}.${key}`, item, fieldName, out);
+  }
+}
+
+function findPluginsJs(profile: RuntimeProfile): string | undefined {
+  for (const root of [profile.outputRoot, profile.sourceRoot]) {
+    for (const rel of ["js/plugins.js", "www/js/plugins.js"]) {
+      const candidate = path.join(root, rel);
+      if (fs.existsSync(candidate)) return candidate;
+    }
+  }
+  return undefined;
+}
+
+function parsePluginsJs(text: string): unknown {
+  const marker = text.indexOf("$plugins");
+  const start = text.indexOf("[", marker < 0 ? 0 : marker);
+  if (start < 0) return [];
+  let depth = 0;
+  let inString = false;
+  let quote = "";
+  let escaped = false;
+  for (let i = start; i < text.length; i++) {
+    const char = text[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === quote) {
+        inString = false;
+      }
+      continue;
+    }
+    if (char === "\"" || char === "'") {
+      inString = true;
+      quote = char;
+      continue;
+    }
+    if (char === "[") depth++;
+    if (char === "]") {
+      depth--;
+      if (depth === 0) return JSON.parse(text.slice(start, i + 1));
+    }
+  }
+  return [];
 }
 
 function isSafeText(value: string): boolean {

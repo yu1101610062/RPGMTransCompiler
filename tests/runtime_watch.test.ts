@@ -19,7 +19,7 @@ import {
 } from "../src/runtime/protocol.js";
 import { processRuntimeRequests, RuntimeRequestReader } from "../src/runtime/watch.js";
 
-describe("runtime watch cache skipping", () => {
+describe("runtime watch", () => {
   it("skips cached translations by default", async () => {
     const { profile } = makeProfile();
     const request = writeRequest(profile, "Hello there");
@@ -47,6 +47,42 @@ describe("runtime watch cache skipping", () => {
     expect(result.skippedCached).toBe(0);
     expect(result.translated).toBe(1);
     expect(readRuntimeCache(runtimeCachePath(profile.outputRoot)).get(request.textKey)?.target).toBe("[zh-Hans] Hello there");
+  });
+
+  it("writes runtime diagnostics and skip reasons", async () => {
+    const { profile } = makeProfile();
+    writeRequest(profile, "こんにちは");
+    writeRequest(profile, "img/faces/Hero.png");
+
+    const result = await processRuntimeRequests(profile, "mock", new RuntimeRequestReader(profile.outputRoot), 20, 1, true);
+
+    expect(result.processed).toBe(2);
+    expect(result.translated).toBe(1);
+    const stats = JSON.parse(fs.readFileSync(path.join(runtimeRoot(profile.outputRoot), "diag", "runtime-stats.json"), "utf8")) as {
+      processed: number;
+      translated: number;
+      skippedUnsafe: number;
+    };
+    expect(stats.processed).toBe(2);
+    expect(stats.translated).toBe(1);
+    expect(stats.skippedUnsafe).toBe(1);
+    const skipReasons = fs.readFileSync(path.join(runtimeRoot(profile.outputRoot), "diag", "skip-reasons.jsonl"), "utf8");
+    expect(skipReasons).toContain("resource");
+  });
+
+  it("keeps successful items when placeholder retry fails", async () => {
+    const { profile } = makeProfile();
+    const withPlaceholder = writeRequest(profile, "Hello \\N[1]");
+    const plain = writeRequest(profile, "Plain text");
+
+    const result = await processRuntimeRequests(profile, "mock-bad-placeholder", new RuntimeRequestReader(profile.outputRoot), 20, 1, true);
+
+    expect(result.processed).toBe(2);
+    expect(result.translated).toBe(1);
+    expect(result.issues.some(issue => issue.type === "runtime_placeholder_mismatch")).toBe(true);
+    const cache = readRuntimeCache(runtimeCachePath(profile.outputRoot));
+    expect(cache.has(plain.textKey)).toBe(true);
+    expect(cache.has(withPlaceholder.textKey)).toBe(false);
   });
 });
 

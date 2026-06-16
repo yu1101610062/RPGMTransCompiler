@@ -107,15 +107,13 @@ module RPGMTransRuntime
     normalized = normalize_text(text)
     return false if normalized.empty?
     return false if normalized.index("[#{TARGET_LANG}]") == 0
-    return false if visible_char_count_at_most?(normalized, 1)
-    visible = normalized.gsub(/[\\\e][A-Za-z]{1,12}\[[^\]\r\n]{0,80}\]/, "")
+    visible = normalized.gsub(/[\\\e][VvNnPpCcIiSs]\[\d+\]|[\\\e][A-Za-z]{1,12}\[[^\]\r\n]{0,80}\]/, "")
     visible.gsub!(/[\\\e][Gg.!|><^{}\\]/, "")
-    if TARGET_LANG.to_s.index("zh") == 0 && visible =~ /[\u3400-\u9fff]/ && visible !~ /[A-Za-z]/
-      return false
-    end
-    ascii = true
-    normalized.each_byte { |byte| ascii = false if byte > 0x7f }
-    return false if ascii && normalized !~ /[A-Za-z]/
+    return false if visible_char_count_at_most?(visible, 1)
+    return false if normalized =~ /^[A-Za-z0-9_.\/\\:@%+\- ]+\.(png|jpe?g|webp|gif|bmp|ogg|m4a|mp3|wav|flac|json|js|css|html?|ttf|otf|woff2?|rgss3a)$/i
+    return false if normalized =~ /^(?:[A-Za-z]:)?[A-Za-z0-9_. -]+(?:[\/\\][A-Za-z0-9_. -]+)+$/
+    return false if normalized =~ /^<PH_\d+\/>$|^<\/?[A-Za-z][^>\n]{0,120}>$/
+    return false if visible !~ /[A-Za-z0-9\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/
     true
   end
 

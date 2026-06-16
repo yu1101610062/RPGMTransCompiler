@@ -14,6 +14,32 @@ export type SemanticHint =
   | "comment"
   | "unknown";
 
+export type EligibilityCategory =
+  | "ok"
+  | "empty"
+  | "already_translated"
+  | "too_short"
+  | "symbol_only"
+  | "resource"
+  | "code"
+  | "placeholder_only";
+
+export interface EligibilityResult {
+  ok: boolean;
+  reason: string;
+  category: EligibilityCategory;
+}
+
+export interface PretranslateOccurrence {
+  file: string;
+  path: string;
+  semanticHint: SemanticHint;
+  fieldName?: string;
+  commandCode?: number;
+  action: "translate" | "review";
+  eligibility: EligibilityResult;
+}
+
 export interface RuntimeProfile {
   projectId: string;
   sourceRoot: string;
@@ -148,6 +174,7 @@ export interface BatchRequest {
   requestId: string;
   units: TranslationUnit[];
   targetLang: string;
+  placeholderRetry?: boolean;
 }
 
 export interface BatchResult {

@@ -3,9 +3,9 @@ import type { Placeholder, PlaceholderSet } from "../core/types.js";
 const tokenPatterns: Array<{ kind: string; regex: RegExp; allowReorder: boolean }> = [
   { kind: "tyrano.tag", regex: /\[[A-Za-z_][A-Za-z0-9_]*(?:\s+[^\]\r\n]{0,240})?\]/g, allowReorder: false },
   { kind: "renpy.text_tag", regex: /\{\/?[A-Za-z][A-Za-z0-9_]*(?:=[^{}\r\n]{0,120})?\}/g, allowReorder: false },
-  { kind: "rpgm.control.indexed", regex: /[\\\x1b¥￥][VvNnPpCcIiSs]\[\d+\]/g, allowReorder: true },
-  { kind: "rpgm.control.bracket", regex: /[\\\x1b¥￥][A-Za-z]{1,12}\[[^\]\r\n]{0,80}\]/g, allowReorder: true },
-  { kind: "rpgm.control.single", regex: /[\\\x1b¥￥][Gg.!|><^{}\\]/g, allowReorder: true },
+  { kind: "rpgm.control.indexed", regex: /[\\\x1b][VvNnPpCcIiSs]\[\d+\]/g, allowReorder: true },
+  { kind: "rpgm.control.bracket", regex: /[\\\x1b][A-Za-z]{1,12}\[[^\]\r\n]{0,80}\]/g, allowReorder: true },
+  { kind: "rpgm.control.single", regex: /[\\\x1b][Gg.!|><^{}\\]/g, allowReorder: true },
   { kind: "ruby.interpolation", regex: /#\{[^}]*\}/g, allowReorder: false },
   { kind: "js.template.expression", regex: /\$\{[^}]*\}/g, allowReorder: false },
   { kind: "printf", regex: /%(?:\d+\$)?[-+#0 ]*(?:\d+|\*)?(?:\.(?:\d+|\*))?[bcdeEufFgGosxX]/g, allowReorder: true },

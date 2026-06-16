@@ -5,6 +5,7 @@ import type { Issue, RuntimeProfile } from "../core/types.js";
 import { writeJson } from "../core/fs.js";
 import { sha256File } from "../core/hash.js";
 import { normalizePath, rgssBridgePath, rgssRuntimeScriptPath } from "../core/paths.js";
+import { makeEmbeddedZipPath, parseEmbeddedZipPath, readEmbeddedZipText, updateEmbeddedZipEntries } from "../core/embeddedZip.js";
 import { RgssArchive } from "../engines/rgss/archive.js";
 import { buildMvMzRuntimePlugin } from "./mvmzPlugin.js";
 import { buildRenpyRuntimeScript } from "./renpyRuntime.js";
@@ -13,6 +14,8 @@ import { ensureRuntimeDirs, runtimeManifestPath, runtimeRoot, type RuntimeInstal
 
 const BACKUP_DIR = "backups";
 const BACKUP_MANIFEST = "backup-manifest.json";
+const TYRANO_RUNTIME_ENTRY = "data/others/rpgmtrans_runtime.js";
+const TYRANO_RUNTIME_LOADJS = '[loadjs storage="rpgmtrans_runtime.js"]';
 
 export interface RuntimeInstallResult {
   outputRoot: string;
@@ -158,9 +161,22 @@ export function validateRuntimeInstall(profile: RuntimeProfile): Issue[] {
     else if (!fs.existsSync(script)) issues.push(issue("renpy_runtime_script_missing", "fatal", `Ren'Py runtime script is missing: ${script}`));
   }
   if (profile.engine.name === "TYRANO") {
-    const script = path.join(profile.outputRoot, "data", "others", "rpgmtrans_runtime.js");
-    if (!fs.existsSync(script)) issues.push(issue("tyrano_runtime_script_missing", "fatal", `Tyrano runtime script is missing: ${script}`));
-    if (!isTyranoRuntimeRegistered(profile.outputRoot)) issues.push(issue("tyrano_runtime_not_registered", "fatal", "Tyrano runtime script is not loaded by the game entry files."));
+    const embedded = findEmbeddedTyranoEntry(profile);
+    if (embedded) {
+      const runtimePath = makeEmbeddedZipPath(embedded.archive, TYRANO_RUNTIME_ENTRY);
+      try {
+        if (!readEmbeddedZipText(runtimePath).includes("RPGMTransRuntime bridge for TyranoScript")) {
+          issues.push(issue("tyrano_runtime_script_missing", "fatal", `Embedded Tyrano runtime script is invalid: ${runtimePath}`));
+        }
+      } catch {
+        issues.push(issue("tyrano_runtime_script_missing", "fatal", `Embedded Tyrano runtime script is missing: ${runtimePath}`));
+      }
+      if (!isEmbeddedTyranoRuntimeRegistered(embedded)) issues.push(issue("tyrano_runtime_not_registered", "fatal", "Embedded Tyrano runtime script is not loaded by the packaged entry script."));
+    } else {
+      const script = path.join(profile.outputRoot, "data", "others", "rpgmtrans_runtime.js");
+      if (!fs.existsSync(script)) issues.push(issue("tyrano_runtime_script_missing", "fatal", `Tyrano runtime script is missing: ${script}`));
+      if (!isTyranoRuntimeRegistered(profile.outputRoot)) issues.push(issue("tyrano_runtime_not_registered", "fatal", "Tyrano runtime script is not loaded by the game entry files."));
+    }
   }
   return issues;
 }
@@ -239,33 +255,86 @@ function installRenpyRuntime(profile: RuntimeProfile, issues: Issue[]): void {
 }
 
 function installTyranoRuntime(profile: RuntimeProfile, issues: Issue[]): void {
-  const plugin = path.join(profile.outputRoot, "data", "others", "rpgmtrans_runtime.js");
-  backupFile(profile.outputRoot, relativeGamePath(profile.outputRoot, plugin));
-  fs.mkdirSync(path.dirname(plugin), { recursive: true });
-  fs.writeFileSync(plugin, buildTyranoRuntimePlugin(profile.targetLang), "utf8");
-
   const entry = findTyranoEntryScript(profile.outputRoot);
   if (entry) {
+    writeExternalTyranoRuntime(profile);
     backupFile(profile.outputRoot, relativeGamePath(profile.outputRoot, entry));
     let text = fs.readFileSync(entry, "utf8");
     if (!text.includes("rpgmtrans_runtime.js")) {
-      text = `[loadjs storage="rpgmtrans_runtime.js"]\n${text}`;
+      text = `${TYRANO_RUNTIME_LOADJS}\n${text}`;
       fs.writeFileSync(entry, text, "utf8");
     }
     return;
   }
 
   const index = path.join(profile.outputRoot, "index.html");
-  if (!fs.existsSync(index)) {
-    issues.push(issue("tyrano_entry_missing", "fatal", `Unable to locate Tyrano entry script or index.html in ${profile.outputRoot}`));
+  if (fs.existsSync(index)) {
+    writeExternalTyranoRuntime(profile);
+    backupFile(profile.outputRoot, relativeGamePath(profile.outputRoot, index));
+    let html = fs.readFileSync(index, "utf8");
+    if (!html.includes("rpgmtrans_runtime.js")) {
+      const scriptTag = '<script src="data/others/rpgmtrans_runtime.js"></script>';
+      html = /<\/body>/i.test(html) ? html.replace(/<\/body>/i, `${scriptTag}\n</body>`) : `${html}\n${scriptTag}\n`;
+      fs.writeFileSync(index, html, "utf8");
+    }
     return;
   }
-  backupFile(profile.outputRoot, relativeGamePath(profile.outputRoot, index));
-  let html = fs.readFileSync(index, "utf8");
-  if (!html.includes("rpgmtrans_runtime.js")) {
-    const scriptTag = '<script src="data/others/rpgmtrans_runtime.js"></script>';
-    html = /<\/body>/i.test(html) ? html.replace(/<\/body>/i, `${scriptTag}\n</body>`) : `${html}\n${scriptTag}\n`;
-    fs.writeFileSync(index, html, "utf8");
+
+  const embedded = findEmbeddedTyranoEntry(profile);
+  if (embedded) {
+    installEmbeddedTyranoRuntime(profile, embedded);
+    return;
+  }
+
+  issues.push(issue("tyrano_entry_missing", "fatal", `Unable to locate Tyrano entry script, index.html, or embedded entry package in ${profile.outputRoot}`));
+}
+
+function writeExternalTyranoRuntime(profile: RuntimeProfile): void {
+  const plugin = path.join(profile.outputRoot, TYRANO_RUNTIME_ENTRY);
+  backupFile(profile.outputRoot, relativeGamePath(profile.outputRoot, plugin));
+  fs.mkdirSync(path.dirname(plugin), { recursive: true });
+  fs.writeFileSync(plugin, buildTyranoRuntimePlugin(profile.targetLang), "utf8");
+}
+
+function installEmbeddedTyranoRuntime(profile: RuntimeProfile, embedded: { archive: string; entry: string }): void {
+  backupFile(profile.outputRoot, relativeGamePath(profile.outputRoot, embedded.archive));
+  const entryPath = makeEmbeddedZipPath(embedded.archive, embedded.entry);
+  let entryText = readEmbeddedZipText(entryPath);
+  if (!entryText.includes("rpgmtrans_runtime.js")) {
+    entryText = `${TYRANO_RUNTIME_LOADJS}\n${entryText}`;
+  }
+  updateEmbeddedZipEntries(embedded.archive, [
+    { name: TYRANO_RUNTIME_ENTRY, data: buildTyranoRuntimePlugin(profile.targetLang) },
+    { name: embedded.entry, data: entryText }
+  ]);
+}
+
+function findEmbeddedTyranoEntry(profile: RuntimeProfile): { archive: string; entry: string } | undefined {
+  const parsed = profile.data.files
+    .map(file => parseEmbeddedZipPath(file))
+    .filter((item): item is { archive: string; entry: string } => Boolean(item));
+  if (!parsed.length) return undefined;
+  const archive = parsed[0].archive;
+  const entries = parsed.filter(item => item.archive === archive).map(item => item.entry);
+  const entrySet = new Set(entries);
+  for (const candidate of [
+    "data/scenario/first.ks",
+    "data/scenario/title_screen.ks",
+    "data/scenario/title.ks",
+    "data/scenario/scene1.ks"
+  ]) {
+    if (entrySet.has(candidate)) return { archive, entry: candidate };
+  }
+  const fallback = entries.filter(entry => /^data\/scenario\/.+\.ks$/i.test(entry) && !/\/system\//i.test(entry)).sort()[0]
+    || entries.filter(entry => /^data\/scenario\/.+\.ks$/i.test(entry)).sort()[0];
+  return fallback ? { archive, entry: fallback } : undefined;
+}
+
+function isEmbeddedTyranoRuntimeRegistered(embedded: { archive: string; entry: string }): boolean {
+  try {
+    return readEmbeddedZipText(makeEmbeddedZipPath(embedded.archive, embedded.entry)).includes("rpgmtrans_runtime.js");
+  } catch {
+    return false;
   }
 }
 

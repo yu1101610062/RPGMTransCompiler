@@ -6,7 +6,8 @@ import { writeReports } from "./core/reporter.js";
 import { installRuntime, restoreRuntime, validateRuntimeInstall } from "./runtime/install.js";
 import { launchGame, waitForExit } from "./runtime/launcher.js";
 import { processRuntimeRequests, watchRuntime, RuntimeRequestReader } from "./runtime/watch.js";
-import { pretranslateRuntime } from "./pretranslate/pretranslate.js";
+import { estimatePretranslateRuntime, pretranslateRuntime } from "./pretranslate/pretranslate.js";
+import type { PretranslateEstimate } from "./pretranslate/types.js";
 
 export function scanCommand(sourceRoot: string, options: { targetLang?: string; out?: string; db?: string }): { dbPath: string; profile: RuntimeProfile } {
   const result = scanProject(sourceRoot, options);
@@ -66,6 +67,18 @@ export async function watchCommand(dbPath: string, provider: string, options: { 
       fatal: result.issues.filter(item => item.severity === "fatal").length,
       errors: result.issues.filter(item => item.severity === "error").length
     };
+  } finally {
+    db.close();
+  }
+}
+
+export function pretranslateEstimateCommand(dbPath: string, options: { mode?: "safe"; batchSize?: number; overwrite?: boolean; inputTokenPricePerMillion?: number; outputTokenPricePerMillion?: number } = {}): PretranslateEstimate {
+  const db = new ProjectDb(dbPath);
+  try {
+    const profile = db.getProfile();
+    const result = estimatePretranslateRuntime(profile, options);
+    db.setJson("runtime_pretranslate_estimate", { ...result, updatedAt: new Date().toISOString() });
+    return result;
   } finally {
     db.close();
   }

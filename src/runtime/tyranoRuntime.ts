@@ -22,6 +22,9 @@ const PLUGIN = String.raw`// RPGMTransRuntime bridge for TyranoScript.
   }
 
   var root = process.cwd();
+  try {
+    if (process.execPath) root = path.dirname(process.execPath);
+  } catch (_) {}
   var runtimeDir = path.join(root, "RPGMTransRuntime");
   var requestDir = path.join(runtimeDir, "requests");
   var cacheFile = path.join(runtimeDir, "cache", "translations.rtc");
@@ -31,6 +34,7 @@ const PLUGIN = String.raw`// RPGMTransRuntime bridge for TyranoScript.
   var lastCacheCheck = 0;
   var translations = Object.create(null);
   var seen = Object.create(null);
+  var pendingDialogue = null;
 
   function mkdirp(dir) {
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
@@ -41,42 +45,76 @@ const PLUGIN = String.raw`// RPGMTransRuntime bridge for TyranoScript.
   mkdirp(diagDir);
   if (!fs.existsSync(cacheFile)) fs.writeFileSync(cacheFile, "# RPGMTransRuntime cache v1\n", "utf8");
   fs.appendFileSync(sessionFile, "# RPGMTransRuntime requests v1\n", "utf8");
+  logDiag("runtime loaded: " + sessionFile);
+
+  function logDiag(message) {
+    try { fs.appendFileSync(path.join(diagDir, "plugin.log"), "[" + new Date().toISOString() + "] " + message + "\n", "utf8"); } catch (_) {}
+  }
 
   function runtimeHash(input) {
-    var bytes = Buffer.from(String(input), "utf8");
+    var bytes = makeBuffer(String(input), "utf8");
     var seeds = [0x811c9dc5, 0x1f123bb5, 0x9e3779b9, 0x85ebca6b];
     var out = [];
     for (var s = 0; s < seeds.length; s++) {
       var hash = seeds[s] >>> 0;
       for (var i = 0; i < bytes.length; i++) {
         hash ^= bytes[i];
-        hash = Math.imul(hash, 0x01000193) >>> 0;
+        hash = imul32(hash, 0x01000193) >>> 0;
       }
       out.push(("00000000" + hash.toString(16)).slice(-8));
     }
     return out.join("");
   }
 
+  function imul32(a, b) {
+    if (typeof Math.imul === "function") return Math.imul(a, b);
+    var ah = (a >>> 16) & 0xffff;
+    var al = a & 0xffff;
+    var bh = (b >>> 16) & 0xffff;
+    var bl = b & 0xffff;
+    return (al * bl + (((ah * bl + al * bh) & 0xffff) << 16)) | 0;
+  }
+
   function hex(input) {
-    return Buffer.from(String(input), "utf8").toString("hex");
+    return makeBuffer(String(input), "utf8").toString("hex");
   }
 
   function unhex(input) {
-    return Buffer.from(String(input), "hex").toString("utf8");
+    return makeBuffer(String(input), "hex").toString("utf8");
+  }
+
+  function makeBuffer(input, encoding) {
+    if (typeof Buffer.from === "function") return Buffer.from(input, encoding);
+    return new Buffer(input, encoding);
   }
 
   function normalizeText(input) {
     return String(input == null ? "" : input).replace(/\r\n/g, "\n").replace(/\r/g, "\n").replace(/[ \t]+/g, " ").trim();
   }
 
+  function stripTyranoDisplayTags(input) {
+    return normalizeText(String(input == null ? "" : input)
+      .replace(/\[(?:p|r|l|cm|ct|clearfix|resetfont|resetconfig|endlink)\b[^\]\r\n]*\]/gi, "")
+      .replace(/^\s*@(?:p|r|l|cm|ct)\b[^\r\n]*$/gim, ""));
+  }
+
   function shouldRecordText(input) {
     var text = normalizeText(input);
     if (!text) return false;
     if (text.indexOf("[" + TARGET_LANG + "]") === 0) return false;
+    if (looksLikeCode(text)) return false;
     var ascii = /^[\x00-\x7f]+$/.test(text);
     if (ascii && text.length === 1) return false;
     if (ascii && !/[A-Za-z]/.test(text)) return false;
     return true;
+  }
+
+  function looksLikeCode(text) {
+    if (/^(?:if|for|while|switch)\s*\(.+\)\s*\{?$/.test(text)) return true;
+    if (/^(?:var|let|const|return|else)\b/.test(text) && /[;{}()=]/.test(text)) return true;
+    if (/^(?:tf|sf|mp|f|TYRANO|tyrano|this|kag)\b(?:[.\[])/.test(text) && /[;{}()=]/.test(text)) return true;
+    if (/^[A-Za-z_$][\w$]*(?:[.\[][^\s]*)+\s*=\s*[^=].*;?$/.test(text)) return true;
+    return false;
   }
 
   function placeholderSignature(input) {
@@ -138,7 +176,7 @@ const PLUGIN = String.raw`// RPGMTransRuntime bridge for TyranoScript.
       translations = parseCache();
       return true;
     } catch (error) {
-      try { fs.appendFileSync(path.join(diagDir, "plugin.log"), String(error.stack || error) + "\n", "utf8"); } catch (_) {}
+      logDiag(String(error.stack || error));
       return false;
     }
   }
@@ -153,13 +191,46 @@ const PLUGIN = String.raw`// RPGMTransRuntime bridge for TyranoScript.
     return null;
   }
 
-  function record(source, hook, width, align) {
-    var normalized = normalizeText(source);
-    if (!shouldRecordText(source)) return source;
-    var tk = textKey(source);
-    var sk = surfaceKey(source, hook, "", "", width || "", align || "");
-    var target = lookup(source, sk, tk);
-    if (target != null) return target;
+  function lookupSources(source, hook) {
+    var displaySource = stripTyranoDisplayTags(source);
+    var sources = [];
+    function push(value) {
+      var normalized = normalizeText(value);
+      if (!normalized) return;
+      for (var i = 0; i < sources.length; i++) {
+        if (sources[i] === normalized) return;
+      }
+      sources.push(normalized);
+    }
+    push(displaySource);
+    if (hook === "text") push(displaySource + "[p]");
+    push(source);
+    return sources;
+  }
+
+  function findCachedTranslation(source, hook, width, align) {
+    var sources = lookupSources(source, hook);
+    for (var i = 0; i < sources.length; i++) {
+      var candidate = sources[i];
+      var tk = textKey(candidate);
+      var sk = surfaceKey(candidate, hook, "", "", width || "", align || "");
+      var target = lookup(candidate, sk, tk);
+      if (target != null) {
+        return { target: stripTyranoDisplayTags(target), source: candidate, textKey: tk, surfaceKey: sk };
+      }
+    }
+    return null;
+  }
+
+  function translateTextResult(source, hook, width, align, options) {
+    var requestSource = stripTyranoDisplayTags(source);
+    if (!shouldRecordText(requestSource)) return { value: source, hit: false, requestSource: requestSource };
+    var hit = findCachedTranslation(requestSource, hook, width, align);
+    if (hit) return { value: hit.target, hit: true, requestSource: requestSource };
+    if (options && options.recordMiss === false) return { value: source, hit: false, requestSource: requestSource };
+    var normalized = normalizeText(requestSource);
+    var tk = textKey(requestSource);
+    var sk = surfaceKey(requestSource, hook, "", "", width || "", align || "");
     if (!seen[sk]) {
       seen[sk] = true;
       var line = [
@@ -174,40 +245,102 @@ const PLUGIN = String.raw`// RPGMTransRuntime bridge for TyranoScript.
         String(width || ""),
         String(align || ""),
         hex(normalized),
-        hex(source),
+        hex(requestSource),
         placeholderSignature(normalized),
         new Date().toISOString()
       ].join("\t") + "\n";
       try { fs.appendFileSync(sessionFile, line, "utf8"); } catch (error) {}
     }
-    return source;
+    return { value: source, hit: false, requestSource: requestSource };
   }
 
-  function translateText(value, hook) {
+  function translateText(value, hook, options) {
     if (typeof value !== "string") return value;
-    return record(value, hook || "tyrano", "", "");
+    return translateTextResult(value, hook || "tyrano", "", "", options).value;
+  }
+
+  function rememberPendingDialogue(tagThis, source) {
+    var requestSource = stripTyranoDisplayTags(source);
+    if (!shouldRecordText(requestSource)) return;
+    pendingDialogue = { tag: tagThis, source: requestSource, createdAt: Date.now() };
+  }
+
+  function repaintPendingDialogue() {
+    if (!pendingDialogue) return;
+    if (Date.now() - pendingDialogue.createdAt > 30000) {
+      pendingDialogue = null;
+      return;
+    }
+    var hit = findCachedTranslation(pendingDialogue.source, "text", "", "");
+    if (!hit) return;
+    var target = hit.target;
+    var tag = pendingDialogue.tag || {};
+    var kag = tag.kag || (window.TYRANO && window.TYRANO.kag);
+    if (!kag || typeof kag.getMessageInnerLayer !== "function") return;
+    var layer = kag.getMessageInnerLayer();
+    if (!layer || !layer.length) return;
+    var current = "";
+    try { current = normalizeText(typeof layer.text === "function" ? layer.text() : ""); } catch (_) {}
+    var expected = normalizeText(pendingDialogue.source);
+    if (current && expected && current.indexOf(expected) === -1 && expected.indexOf(current) === -1) return;
+    try {
+      var paragraph = typeof layer.find === "function" ? layer.find("p").last() : null;
+      if (paragraph && paragraph.length && typeof paragraph.empty === "function") {
+        paragraph.empty();
+        paragraph.text(target);
+      } else if (typeof layer.text === "function") {
+        layer.text(target);
+      }
+      if (kag.stat) kag.stat.current_message_str = target;
+      pendingDialogue = null;
+      logDiag("repainted pending text");
+    } catch (error) {
+      logDiag("repaint pending text failed: " + String(error && (error.stack || error.message) || error));
+    }
   }
 
   function patchTyranoTags() {
-    var kag = window.TYRANO && window.TYRANO.kag;
-    if (!kag || !kag.ftag || !kag.ftag.master_tag) return false;
-    var tags = kag.ftag.master_tag;
-    ["text", "ptext", "glink", "button", "link", "chara_name"].forEach(function(name) {
-      var tag = tags[name];
-      if (!tag || tag._rpgmtransPatched || typeof tag.start !== "function") return;
-      var oldStart = tag.start;
-      tag.start = function(pm) {
-        try {
-          if (pm) {
-            if (typeof pm.text === "string") pm.text = translateText(pm.text, name);
-            if (name === "chara_name" && typeof pm.name === "string") pm.name = translateText(pm.name, name);
+    var patchedAny = false;
+    function patchTagSet(tags, sourceName) {
+      if (!tags) return false;
+      var changed = false;
+      ["text", "ptext", "glink", "button", "link", "chara_name", "chara_ptext"].forEach(function(name) {
+        var tag = tags[name];
+        if (!tag || tag._rpgmtransPatched || typeof tag.start !== "function") return;
+        var oldStart = tag.start;
+        tag.start = function(pm) {
+          try {
+            if (pm) {
+              if (name === "text" && typeof pm.val === "string") {
+                var textResult = translateTextResult(pm.val, "text", "", "", {});
+                if (textResult.hit) {
+                  pm.val = textResult.value;
+                  pendingDialogue = null;
+                } else {
+                  rememberPendingDialogue(this, pm.val);
+                }
+              }
+              if (typeof pm.text === "string") pm.text = translateText(pm.text, name);
+              if ((name === "chara_name" || name === "chara_ptext") && typeof pm.name === "string") pm.name = translateText(pm.name, name);
+            }
+          } catch (error) {
+            logDiag("patch " + sourceName + "." + name + " failed: " + String(error && (error.stack || error.message) || error));
           }
-        } catch (error) {}
-        return oldStart.apply(this, arguments);
-      };
-      tag._rpgmtransPatched = true;
-    });
-    return true;
+          return oldStart.apply(this, arguments);
+        };
+        tag._rpgmtransPatched = true;
+        changed = true;
+      });
+      return changed;
+    }
+    if (window.tyrano && window.tyrano.plugin && window.tyrano.plugin.kag) {
+      patchedAny = patchTagSet(window.tyrano.plugin.kag.tag, "tyrano.plugin.kag.tag") || patchedAny;
+    }
+    var kag = window.TYRANO && window.TYRANO.kag;
+    if (kag && kag.ftag) {
+      patchedAny = patchTagSet(kag.ftag.master_tag, "TYRANO.kag.ftag.master_tag") || patchedAny;
+    }
+    return patchedAny;
   }
 
   function walkTextNodes(rootNode, visitor) {
@@ -224,7 +357,7 @@ const PLUGIN = String.raw`// RPGMTransRuntime bridge for TyranoScript.
   function refreshDomText() {
     walkTextNodes(document.body, function(node) {
       var source = node.nodeValue;
-      var target = translateText(source, "dom");
+      var target = translateText(source, "dom", { recordMiss: false });
       if (target !== source) node.nodeValue = target;
     });
   }
@@ -237,7 +370,8 @@ const PLUGIN = String.raw`// RPGMTransRuntime bridge for TyranoScript.
 
   var patched = false;
   var timer = setInterval(function() {
-    reloadCacheIfNeeded(false);
+    var reloaded = reloadCacheIfNeeded(false);
+    if (reloaded) repaintPendingDialogue();
     if (!patched) patched = patchTyranoTags();
     refreshDomText();
   }, 250);

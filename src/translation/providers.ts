@@ -11,6 +11,7 @@ for (const envFile of [".env", ".env.local"]) {
 
 export function createProvider(name: string): LLMProvider {
   if (name === "mock") return new MockProvider();
+  if (name === "mock-bad-placeholder") return new MockBadPlaceholderProvider();
   if (name === "deepseek") return new DeepSeekProvider();
   if (name === "openai" || name === "openai-compatible") return new OpenAICompatibleProvider();
   throw new Error(`Unknown provider: ${name}`);
@@ -33,6 +34,28 @@ export class MockProvider implements LLMProvider {
       translations: request.units.map(unit => ({
         unitId: unit.unitId,
         target: `[${request.targetLang}] ${unit.protectedSource}`
+      }))
+    };
+  }
+}
+
+export class MockBadPlaceholderProvider implements LLMProvider {
+  name = "mock-bad-placeholder";
+
+  supportsStructuredOutput(): boolean {
+    return true;
+  }
+
+  supportsNativeBatch(): boolean {
+    return false;
+  }
+
+  async translateBatch(request: BatchRequest): Promise<BatchResult> {
+    return {
+      requestId: request.requestId,
+      translations: request.units.map(unit => ({
+        unitId: unit.unitId,
+        target: `[${request.targetLang}] ${unit.protectedSource.replace(/<PH_\d+\/>/g, "")}`
       }))
     };
   }
@@ -65,7 +88,7 @@ export class OpenAICompatibleProvider implements LLMProvider {
       body: JSON.stringify({
         model: this.model,
         input: [
-          { role: "system", content: systemPrompt() },
+          { role: "system", content: systemPrompt(Boolean(request.placeholderRetry)) },
           { role: "user", content: JSON.stringify(providerPayload(request)) }
         ],
         text: {
@@ -110,7 +133,7 @@ export class DeepSeekProvider implements LLMProvider {
       body: JSON.stringify({
         model: this.model,
         messages: [
-          { role: "system", content: systemPrompt() },
+          { role: "system", content: systemPrompt(Boolean(request.placeholderRetry)) },
           { role: "user", content: JSON.stringify(providerPayload(request)) }
         ],
         response_format: { type: "json_object" },
@@ -130,14 +153,18 @@ export class DeepSeekProvider implements LLMProvider {
   }
 }
 
-function systemPrompt(): string {
-  return [
+function systemPrompt(placeholderRetry = false): string {
+  const lines = [
     "You are a localization engine for RPG Maker games.",
     "Translate natural-language game UI and dialogue into the requested target language.",
     "Preserve every placeholder token exactly, for example <PH_0/>.",
     "Do not add markdown, comments, or explanations.",
     "Return only JSON with this shape: {\"translations\":[{\"unitId\":\"...\",\"target\":\"...\"}]}."
-  ].join("\n");
+  ];
+  if (placeholderRetry) {
+    lines.push("This is a retry after placeholder validation failed. Copy every <PH_n/> token exactly once unless it appears more than once in the input.");
+  }
+  return lines.join("\n");
 }
 
 function providerPayload(request: BatchRequest): Record<string, unknown> {
@@ -147,9 +174,21 @@ function providerPayload(request: BatchRequest): Record<string, unknown> {
       unitId: unit.unitId,
       text: unit.protectedSource,
       semanticHint: unit.semanticHint,
-      context: unit.context
+      contextCode: compactContextCode(unit),
+      commandCode: unit.commandCode ?? null,
+      fieldName: unit.fieldName ?? null
     }))
   };
+}
+
+function compactContextCode(unit: BatchRequest["units"][number]): string {
+  const parts = [
+    unit.engine,
+    unit.semanticHint,
+    unit.fieldName || "",
+    unit.commandCode === undefined ? "" : String(unit.commandCode)
+  ].filter(Boolean);
+  return parts.join(":");
 }
 
 function translationSchema(): Record<string, unknown> {
