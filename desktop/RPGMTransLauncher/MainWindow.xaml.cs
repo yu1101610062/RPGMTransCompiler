@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Net.Http;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using Microsoft.UI.Dispatching;
@@ -14,6 +15,11 @@ namespace RPGMTransLauncher;
 
 public sealed partial class MainWindow : Window
 {
+    private static readonly HttpClient ModelListHttp = new()
+    {
+        Timeout = TimeSpan.FromSeconds(30)
+    };
+
     private const uint SwpNoZOrder = 0x0004;
     private const uint SwpNoActivate = 0x0010;
     private const int GwlWndProc = -4;
@@ -51,6 +57,7 @@ public sealed partial class MainWindow : Window
     private LauncherConfig _config = new();
     private List<ModelSourceConfig> _modelSources = new();
     private List<ModelSourceItem> _modelSourceItems = new();
+    private List<string> _modelSuggestions = new();
     private ModelSourceConfig? _editingSource;
     private string? _watcherConfigSignature;
     private string _exePath = "";
@@ -467,6 +474,91 @@ public sealed partial class MainWindow : Window
         var show = ConfigShowKeyBox.IsChecked == true;
         ConfigApiKeyTextBox.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
         ConfigApiKeyPasswordBox.Visibility = show ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    private async void FetchModelsButton_Click(object sender, RoutedEventArgs e)
+    {
+        await GuardAsync(FetchModelsForEditorAsync);
+    }
+
+    private void ConfigModelBox_TextChanged(AutoSuggestBox sender, AutoSuggestBoxTextChangedEventArgs args)
+    {
+        if (_loadingModelSourceUi) return;
+        if (args.Reason != AutoSuggestionBoxTextChangeReason.UserInput) return;
+        RefreshModelSuggestionList();
+    }
+
+    private void ConfigModelBox_SuggestionChosen(AutoSuggestBox sender, AutoSuggestBoxSuggestionChosenEventArgs args)
+    {
+        if (args.SelectedItem is string model) sender.Text = model;
+    }
+
+    private void ConfigModelBox_QuerySubmitted(AutoSuggestBox sender, AutoSuggestBoxQuerySubmittedEventArgs args)
+    {
+        if (args.ChosenSuggestion is string model) sender.Text = model;
+    }
+
+    private async Task FetchModelsForEditorAsync()
+    {
+        var source = BuildEditorModelSource();
+        var apiKey = ConfigApiKeyText.Trim();
+        if (string.IsNullOrWhiteSpace(apiKey)) apiKey = ProviderSpecificApiKeyFallback(source) ?? "";
+        if (string.IsNullOrWhiteSpace(apiKey)) throw new InvalidOperationException("请先填写 API Key，或设置当前格式对应的环境变量。");
+
+        FetchModelsButton.IsEnabled = false;
+        try
+        {
+            StatusText.Text = "正在获取模型列表...";
+            var models = await FetchModelListAsync(source.Format, source.BaseUrl, apiKey.Trim());
+            if (models.Count == 0) throw new InvalidOperationException("接口没有返回可用模型。");
+            SaveCurrentModelSourceFromEditor();
+            var target = _editingSource ?? SelectedModelSource ?? throw new InvalidOperationException("当前没有可保存的模型源。");
+            target.AvailableModels = CleanModelList(models);
+            SaveLauncherConfig();
+            _modelSuggestions = target.AvailableModels;
+            RefreshModelSuggestionList();
+            ConfigModelBox.Focus(FocusState.Programmatic);
+            ConfigModelBox.IsSuggestionListOpen = true;
+            StatusText.Text = $"已获取并保存 {_modelSuggestions.Count} 个模型";
+            AppendLog($"已获取并保存模型列表: {source.Format} / {_modelSuggestions.Count} 个模型");
+        }
+        finally
+        {
+            FetchModelsButton.IsEnabled = true;
+        }
+    }
+
+    private ModelSourceConfig BuildEditorModelSource()
+    {
+        return new ModelSourceConfig
+        {
+            Id = _editingSource?.Id ?? "",
+            Name = ConfigNameBox.Text,
+            Format = (ConfigFormatBox.SelectedItem as ModelFormatOption)?.Format ?? "openai-chat",
+            BaseUrl = LauncherConfigStore.EmptyToNull(ConfigBaseUrlBox.Text),
+            Model = LauncherConfigStore.EmptyToNull(ConfigModelBox.Text)
+        };
+    }
+
+    private void RefreshModelSuggestionList()
+    {
+        if (_modelSuggestions.Count == 0)
+        {
+            ConfigModelBox.ItemsSource = null;
+            return;
+        }
+
+        ConfigModelBox.ItemsSource = _modelSuggestions;
+    }
+
+    private static List<string> CleanModelList(IEnumerable<string> models)
+    {
+        return models
+            .Select(model => model.Trim())
+            .Where(model => !string.IsNullOrWhiteSpace(model))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(model => model, StringComparer.OrdinalIgnoreCase)
+            .ToList();
     }
 
     private void AddModelSource_Click(object sender, RoutedEventArgs e)
@@ -971,6 +1063,133 @@ public sealed partial class MainWindow : Window
         };
     }
 
+    private static async Task<List<string>> FetchModelListAsync(string format, string? baseUrl, string apiKey)
+    {
+        var endpoint = BuildModelListEndpoint(format, baseUrl, apiKey);
+        using var request = new HttpRequestMessage(HttpMethod.Get, endpoint);
+        if (format is "openai-responses" or "openai-chat")
+        {
+            request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", apiKey);
+        }
+        else if (format == "anthropic")
+        {
+            request.Headers.TryAddWithoutValidation("x-api-key", apiKey);
+            request.Headers.TryAddWithoutValidation("anthropic-version", "2023-06-01");
+        }
+
+        using var response = await ModelListHttp.SendAsync(request);
+        var body = await response.Content.ReadAsStringAsync();
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new InvalidOperationException($"获取模型列表失败 {((int)response.StatusCode)}: {TrimErrorBody(body)}");
+        }
+
+        using var document = JsonDocument.Parse(body);
+        return ParseModelList(format, document.RootElement);
+    }
+
+    private static string BuildModelListEndpoint(string format, string? baseUrl, string apiKey)
+    {
+        var root = (string.IsNullOrWhiteSpace(baseUrl), format) switch
+        {
+            (true, "anthropic") => "https://api.anthropic.com/v1",
+            (true, "google") => "https://generativelanguage.googleapis.com/v1beta",
+            (true, _) => "https://api.openai.com/v1",
+            _ => baseUrl!.Trim()
+        };
+        var endpoint = AppendPathIfNeeded(root, "models");
+        return format == "google" ? AppendQuery(endpoint, "key", apiKey) : endpoint;
+    }
+
+    private static string AppendPathIfNeeded(string root, string path)
+    {
+        var trimmed = root.TrimEnd('/');
+        return trimmed.EndsWith($"/{path}", StringComparison.OrdinalIgnoreCase)
+            ? trimmed
+            : $"{trimmed}/{path}";
+    }
+
+    private static string AppendQuery(string url, string key, string value)
+    {
+        var separator = url.Contains("?", StringComparison.Ordinal) ? "&" : "?";
+        return $"{url}{separator}{Uri.EscapeDataString(key)}={Uri.EscapeDataString(value)}";
+    }
+
+    private static List<string> ParseModelList(string format, JsonElement root)
+    {
+        var models = new List<string>();
+        if (root.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in root.EnumerateArray()) AddModelListItem(format, item, models);
+        }
+        if (root.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in data.EnumerateArray()) AddModelListItem(format, item, models);
+        }
+        if (root.TryGetProperty("models", out var modelArray) && modelArray.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in modelArray.EnumerateArray()) AddModelListItem(format, item, models);
+        }
+
+        return models
+            .Select(model => NormalizeModelId(format, model))
+            .Where(model => !string.IsNullOrWhiteSpace(model))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(model => model, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private static void AddModelListItem(string format, JsonElement item, List<string> models)
+    {
+        if (item.ValueKind == JsonValueKind.String)
+        {
+            var value = item.GetString();
+            if (!string.IsNullOrWhiteSpace(value)) models.Add(value);
+            return;
+        }
+        if (item.ValueKind != JsonValueKind.Object) return;
+        if (format == "google" && !SupportsGenerateContent(item)) return;
+
+        foreach (var property in new[] { "id", "name", "model" })
+        {
+            if (!item.TryGetProperty(property, out var value) || value.ValueKind != JsonValueKind.String) continue;
+            var text = value.GetString();
+            if (!string.IsNullOrWhiteSpace(text))
+            {
+                models.Add(text);
+                return;
+            }
+        }
+    }
+
+    private static bool SupportsGenerateContent(JsonElement item)
+    {
+        if (!item.TryGetProperty("supportedGenerationMethods", out var methods) || methods.ValueKind != JsonValueKind.Array)
+        {
+            return true;
+        }
+
+        return methods.EnumerateArray()
+            .Select(method => method.GetString())
+            .Any(method => method != null && method.Contains("generateContent", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static string NormalizeModelId(string format, string model)
+    {
+        var text = model.Trim();
+        if (format == "google" && text.StartsWith("models/", StringComparison.OrdinalIgnoreCase))
+        {
+            text = text["models/".Length..];
+        }
+        return text;
+    }
+
+    private static string TrimErrorBody(string body)
+    {
+        var text = string.IsNullOrWhiteSpace(body) ? "empty response body" : body.Trim();
+        return text.Length > 1000 ? $"{text[..1000]}..." : text;
+    }
+
     private void SaveLauncherConfig()
     {
         if (_loadingConfig) return;
@@ -1019,6 +1238,8 @@ public sealed partial class MainWindow : Window
             ConfigNameBox.Text = source?.Name ?? "";
             ConfigBaseUrlBox.Text = source?.BaseUrl ?? "";
             ConfigModelBox.Text = source?.Model ?? "";
+            _modelSuggestions = CleanModelList(source?.AvailableModels ?? []);
+            RefreshModelSuggestionList();
             ConfigInputPriceBox.Text = FormatPrice(source?.InputTokenPricePerMillion, null);
             ConfigOutputPriceBox.Text = FormatPrice(source?.OutputTokenPricePerMillion, null);
             SetConfigApiKeyText(source == null ? "" : LauncherConfigStore.UnprotectSecret(source.ApiKeyProtected) ?? "");

@@ -9,6 +9,14 @@ import { installRuntime, restoreRuntime, validateRuntimeInstall } from "../src/r
 import { readRuntimeCache, runtimeCachePath, runtimeManifestPath, runtimeTextKey } from "../src/runtime/protocol.js";
 
 describe("runtime install in place", () => {
+  it("keeps RGSS VX message text hooks in the runtime script", () => {
+    const runtimeText = fs.readFileSync(path.join(process.cwd(), "scripts", "runtime_rgss.rb"), "utf8");
+    expect(runtimeText).toContain("elsif $game_message.respond_to?(:texts)");
+    expect(runtimeText).toContain("rpgmtrans_runtime_prepare_vx_message_texts");
+    expect(runtimeText).toContain("rpgmtrans_runtime_translate_message_lines");
+    expect(runtimeText).toContain("$game_message.texts = translated_lines");
+  });
+
   it("injects into the selected game directory, preserves cache, and restores original files", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "rpgmtrans-inplace-"));
     const game = path.join(root, "OriginalGame");

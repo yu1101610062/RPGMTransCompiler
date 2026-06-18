@@ -26,6 +26,7 @@ internal sealed class ModelSourceConfig
     public string Format { get; set; } = "openai-chat";
     public string? BaseUrl { get; set; }
     public string? Model { get; set; }
+    public List<string> AvailableModels { get; set; } = new();
     public string? ApiKeyProtected { get; set; }
     public decimal? InputTokenPricePerMillion { get; set; }
     public decimal? OutputTokenPricePerMillion { get; set; }

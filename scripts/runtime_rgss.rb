@@ -415,6 +415,8 @@ if defined?(Window_Message)
         $game_message.rpgmtrans_runtime_raw_all_text
       elsif $game_message.respond_to?(:all_text)
         $game_message.all_text
+      elsif $game_message.respond_to?(:texts)
+        rpgmtrans_runtime_join_message_lines($game_message.texts)
       else
         nil
       end
@@ -441,6 +443,76 @@ if defined?(Window_Message)
       respond_to?(:contents) && contents ? contents.width : ""
     rescue
       ""
+    end
+
+    def rpgmtrans_runtime_join_message_lines(lines)
+      return nil unless lines && lines.respond_to?(:map)
+      values = lines.map { |line| line.to_s }
+      return nil if values.empty?
+      text = values.join("\n")
+      text += "\n" if values.length > 1
+      text
+    rescue Exception => e
+      RPGMTransRuntime.log_error(e)
+      nil
+    end
+
+    def rpgmtrans_runtime_split_message_translation(source_lines, translated)
+      return nil unless translated
+      text = translated.to_s.gsub("\r\n", "\n").gsub("\r", "\n")
+      parts = text.split("\n", -1)
+      parts.pop if parts.length > 1 && parts[-1].empty?
+      return nil if parts.empty?
+      return nil if source_lines && source_lines.length > 1 && parts.length < source_lines.length
+      parts
+    rescue Exception => e
+      RPGMTransRuntime.log_error(e)
+      nil
+    end
+
+    def rpgmtrans_runtime_translate_message_lines(source_lines)
+      return nil unless source_lines && source_lines.respond_to?(:map)
+      lines = source_lines.map { |line| line.to_s }
+      return nil if lines.empty?
+      width = rpgmtrans_runtime_message_width
+      changed = false
+      rendered = lines.dup
+
+      full_source = rpgmtrans_runtime_join_message_lines(lines)
+      if full_source && lines.length > 1
+        full_translated = RPGMTransRuntime.record(full_source, "message_all", self, width, "")
+        split = rpgmtrans_runtime_split_message_translation(lines, full_translated)
+        if split && split.length >= lines.length
+          rendered = split
+          changed = true
+        end
+      end
+
+      unless changed
+        rendered = lines.map do |line|
+          translated = RPGMTransRuntime.record(line, "message_add", self, "", "")
+          changed = true if translated
+          translated || line
+        end
+      end
+
+      changed ? rendered : nil
+    rescue Exception => e
+      RPGMTransRuntime.log_error(e)
+      nil
+    end
+
+    def rpgmtrans_runtime_prepare_vx_message_texts
+      return unless defined?($game_message) && $game_message && $game_message.respond_to?(:texts)
+      source_lines = $game_message.texts.map { |line| line.to_s }
+      @rpgmtrans_runtime_source_lines = source_lines
+      @rpgmtrans_runtime_source_text = rpgmtrans_runtime_join_message_lines(source_lines)
+      translated_lines = rpgmtrans_runtime_translate_message_lines(source_lines)
+      return unless translated_lines && translated_lines.length > 0
+      $game_message.texts = translated_lines
+      @rpgmtrans_runtime_rendered_text = rpgmtrans_runtime_join_message_lines(translated_lines)
+    rescue Exception => e
+      RPGMTransRuntime.log_error(e)
     end
 
     def rpgmtrans_runtime_repaint_if_translated
@@ -624,10 +696,9 @@ if defined?(Window_Message)
       def start_message(*args)
         begin
           RPGMTransRuntime.current_message_window = self
-          if defined?($game_message) && $game_message
-            text = $game_message.respond_to?(:all_text) ? $game_message.all_text : nil
-            RPGMTransRuntime.record(text, "message", self, contents ? contents.width : "", "") if text
-          end
+          text = rpgmtrans_runtime_capture_source_text
+          RPGMTransRuntime.record(text, "message", self, contents ? contents.width : "", "") if text
+          rpgmtrans_runtime_prepare_vx_message_texts
         rescue Exception => e
           RPGMTransRuntime.log_error(e)
         end
