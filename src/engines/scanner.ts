@@ -100,29 +100,14 @@ function detectEngine(root: string): Detection {
   const renpy = detectRenpy(root);
   if (renpy) return renpy;
 
-  if (fs.existsSync(path.join(root, "data", "System.json")) || fs.existsSync(path.join(root, "www", "data", "System.json"))) {
-    const isMz = fs.existsSync(path.join(root, "js", "rmmz_core.js")) || fs.existsSync(path.join(root, "www", "js", "rmmz_core.js"));
-    const dataRoot = fs.existsSync(path.join(root, "data")) ? path.join(root, "data") : path.join(root, "www", "data");
-    const jsRoot = fs.existsSync(path.join(root, "js")) ? path.join(root, "js") : path.join(root, "www", "js");
-    detectedBy.push(path.relative(root, path.join(dataRoot, "System.json")).replace(/\\/g, "/"));
-    detectedBy.push(path.relative(root, jsRoot).replace(/\\/g, "/"));
-    const plugins = readPlugins(path.join(jsRoot, "plugins.js"));
-    return {
-      family: "RPG_MAKER",
-      engine: isMz ? "MZ" : "MV",
-      confidence: 0.95,
-      detectedBy,
-      dataFormat: "json",
-      dataRoot: normalizePath(dataRoot),
-      dataFiles: listFiles(dataRoot, /\.json$/i),
-      encoding: "utf-8",
-      scriptRuntime: { language: "javascript", runtime: "nwjs" },
-      plugins
-    };
-  }
+  const mvMz = detectMvMz(root);
+  if (mvMz) return mvMz;
 
   const tyrano = detectTyrano(root);
   if (tyrano) return tyrano;
+
+  const packedNwjs = detectPackedNwjs(root);
+  if (packedNwjs) return packedNwjs;
 
   if (ini.includes("RGSS301") || fs.existsSync(path.join(root, "Game.rvproj2")) || archiveVersion === 3) {
     if (ini.includes("RGSS301")) detectedBy.push("Game.ini:Library=System\\RGSS301.dll");
@@ -189,6 +174,131 @@ function detectEngine(root: string): Detection {
     encoding: "unknown",
     scriptRuntime: { language: "unknown", runtime: "unknown" }
   };
+}
+
+function detectMvMz(root: string): Detection | undefined {
+  for (const { dataRoot, jsRoot } of [
+    { dataRoot: path.join(root, "data"), jsRoot: path.join(root, "js") },
+    { dataRoot: path.join(root, "www", "data"), jsRoot: path.join(root, "www", "js") }
+  ]) {
+    if (!fs.existsSync(dataRoot) || !fs.existsSync(jsRoot)) continue;
+    const jsonFiles = listFiles(dataRoot, /\.json$/i);
+    const hasSystem = fs.existsSync(path.join(dataRoot, "System.json"));
+    const hasData = hasSystem || jsonFiles.some(file => /[\\\/](Actors|CommonEvents|MapInfos|Map\d+|Items|Skills|Troops)\.json$/i.test(file));
+    const coreFile = fs.existsSync(path.join(jsRoot, "rmmz_core.js"))
+      ? "rmmz_core.js"
+      : fs.existsSync(path.join(jsRoot, "rpg_core.js"))
+        ? "rpg_core.js"
+        : "";
+    if (!hasData || !coreFile) continue;
+
+    const detectedBy = [
+      hasSystem
+        ? path.relative(root, path.join(dataRoot, "System.json")).replace(/\\/g, "/")
+        : `${path.relative(root, dataRoot).replace(/\\/g, "/")}/*.json`,
+      path.relative(root, path.join(jsRoot, coreFile)).replace(/\\/g, "/")
+    ];
+    const plugins = readPlugins(path.join(jsRoot, "plugins.js"));
+    return {
+      family: "RPG_MAKER",
+      engine: coreFile === "rmmz_core.js" ? "MZ" : "MV",
+      confidence: hasSystem ? 0.95 : 0.88,
+      detectedBy,
+      dataFormat: "json",
+      dataRoot: normalizePath(dataRoot),
+      dataFiles: jsonFiles,
+      encoding: "utf-8",
+      scriptRuntime: { language: "javascript", runtime: "nwjs" },
+      plugins
+    };
+  }
+  return undefined;
+}
+
+function detectPackedNwjs(root: string): Detection | undefined {
+  const exeFiles = fs.readdirSync(root)
+    .filter(name => name.toLowerCase().endsWith(".exe"))
+    .map(name => path.join(root, name))
+    .sort((a, b) => fs.statSync(b).size - fs.statSync(a).size);
+
+  for (const exe of exeFiles) {
+    const sections = readPeSectionNames(exe);
+    if (!sections.includes(".enigma1") && !sections.includes(".enigma2")) continue;
+    const hasNwjsMarker = fileHeadContains(exe, Buffer.from("NW.js", "utf8"), 1024 * 1024);
+    const hasRpgMakerSaves = hasRpgSaveFiles(root);
+    if (!hasNwjsMarker && !hasRpgMakerSaves) continue;
+    const rel = path.relative(root, exe).replace(/\\/g, "/");
+    const detectedBy = [`${rel}:.enigma1/.enigma2`, "virtualized game files"];
+    if (hasNwjsMarker) detectedBy.unshift(`${rel}:nwjs`);
+    if (hasRpgMakerSaves) detectedBy.push("www/save/*.rpgsave");
+    return {
+      family: "RPG_MAKER",
+      engine: "UNKNOWN",
+      confidence: 0.7,
+      detectedBy,
+      dataFormat: "unknown",
+      dataRoot: normalizePath(root),
+      dataFiles: [],
+      encoding: "unknown",
+      scriptRuntime: { language: "javascript", runtime: "nwjs" }
+    };
+  }
+  return undefined;
+}
+
+function hasRpgSaveFiles(root: string): boolean {
+  for (const rel of [path.join("www", "save"), "save"]) {
+    const dir = path.join(root, rel);
+    if (fs.existsSync(dir) && fs.statSync(dir).isDirectory()) {
+      if (fs.readdirSync(dir).some(name => name.toLowerCase().endsWith(".rpgsave"))) return true;
+    }
+  }
+  return false;
+}
+
+function readPeSectionNames(file: string): string[] {
+  try {
+    const fd = fs.openSync(file, "r");
+    try {
+      const dos = Buffer.alloc(0x100);
+      if (fs.readSync(fd, dos, 0, dos.length, 0) < 0x40 || dos.toString("ascii", 0, 2) !== "MZ") return [];
+      const peOffset = dos.readUInt32LE(0x3c);
+      const header = Buffer.alloc(24);
+      fs.readSync(fd, header, 0, header.length, peOffset);
+      if (header.readUInt32LE(0) !== 0x00004550) return [];
+      const sectionCount = header.readUInt16LE(6);
+      const optionalHeaderSize = header.readUInt16LE(20);
+      const sectionOffset = peOffset + 24 + optionalHeaderSize;
+      const sectionTable = Buffer.alloc(Math.min(sectionCount, 96) * 40);
+      fs.readSync(fd, sectionTable, 0, sectionTable.length, sectionOffset);
+      const names: string[] = [];
+      for (let index = 0; index < sectionTable.length / 40; index++) {
+        const start = index * 40;
+        names.push(sectionTable.toString("ascii", start, start + 8).replace(/\0.*$/, ""));
+      }
+      return names;
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return [];
+  }
+}
+
+function fileHeadContains(file: string, needle: Buffer, maxBytes: number): boolean {
+  try {
+    const fd = fs.openSync(file, "r");
+    try {
+      const size = Math.min(fs.statSync(file).size, maxBytes);
+      const buffer = Buffer.alloc(size);
+      fs.readSync(fd, buffer, 0, size, 0);
+      return buffer.includes(needle);
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return false;
+  }
 }
 
 function detectRenpy(root: string): Detection | undefined {

@@ -852,6 +852,14 @@ public sealed partial class MainWindow : Window
     private static bool TryGetUnsupportedEngineReason(string engine, IReadOnlyList<string> detectedBy, out string reason)
     {
         var detectedText = detectedBy.Count == 0 ? "无明确识别特征" : string.Join("、", detectedBy);
+        if (engine == "UNKNOWN" && detectedBy.Any(item =>
+                item.Contains(".enigma", StringComparison.OrdinalIgnoreCase) ||
+                item.Contains("virtualized game files", StringComparison.OrdinalIgnoreCase)))
+        {
+            reason = $"检测到 Enigma Virtual Box 打包的 NW.js 游戏（{detectedText}）。游戏主体的 www/data 和 www/js 被虚拟化进 exe，当前版本无法直接扫描原始文本或注入 RPG Maker MV/MZ 运行时插件。需要先解包成普通 www/data + www/js 目录后再使用。已清空本次选择。";
+            return true;
+        }
+
         switch (engine)
         {
             case "RM2K":
